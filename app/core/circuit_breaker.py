@@ -45,12 +45,18 @@ class CircuitBreaker:
 
     def record_failure(self, provider_name: str, error_code: int = 500):
         state = self._get_provider_state(provider_name)
+        if state["status"] == ProviderStatus.DEGRADED:
+            state["failures"] = self.failure_threshold
+            state["last_failure"] = time.time()
+            state["status"] = ProviderStatus.UNHEALTHY
+            print(f"[CIRCUIT BREAKER]: Recovery probe failed for '{provider_name}'. Marking UNHEALTHY.")
+            return
         state["failures"] += 1
         state["last_failure"] = time.time()
-        print(f"[CIRCUIT BREAKER]: Error {error_code} on {provider_name}. Consecutive failures: {state['failures']}/self.failure_threshold")
+        print(f"[CIRCUIT BREAKER]: Error {error_code} on {provider_name}. Consecutive failures: {state['failures']}/{self.failure_threshold}")
         if state["failures"] >= self.failure_threshold or error_code == 429:
             state["status"] = ProviderStatus.UNHEALTHY
-            print(f"[CIRCUIT BREAKER]: Circuit OPENED for '{provider_name}. Marking UNHEALTHY.")
+            print(f"[CIRCUIT BREAKER]: Circuit OPENED for '{provider_name}'. Marking UNHEALTHY.")
 
 
 circuit_breaker = CircuitBreaker()

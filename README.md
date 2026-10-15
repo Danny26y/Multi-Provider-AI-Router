@@ -1,149 +1,96 @@
-# ⚡ Enterprise Multi-Provider AI Routing Proxy
+# Multi-Provider AI Router
 
-A high-throughput, OpenAI-compatible **FastAPI proxy gateway** engineered to eliminate single-provider downtime, bypass API rate-limit errors (`429 Too Many Requests`), and optimize LLM inference costs.
+A FastAPI gateway that attempts configured AI providers in order, tracks provider failures with a circuit breaker, and returns a local mock response when no eligible remote provider succeeds.
 
-The system features dynamic provider health tracking, an automated circuit breaker state machine, real-time token/latency telemetry, and an interactive Streamlit operational control center.
-
----
-
-## 🏗️ System Architecture & Failover Flow
+## Request flow
 
 ```text
-                        [ Client Application ]
-                                  │
-                                  ▼
-               ┌─────────────────────────────────────┐
-               │ FastAPI AI Gateway (/v1/chat/...)    │
-               │ • Pydantic Schema Validation         │
-               │ • Token & Cost Analytics Middleware  │
-               └──────────────────┬────────────────────┘
-                                  │
-         ┌────────────────────────┼────────────────────────┐
-         ▼                        ▼                        ▼
-  [ Primary: Groq LPU ]  [ Secondary: Cerebras CS-3 ]  [ Local Resilience ]
-  (Ultra-Fast Llama 3.1) (High-Speed Inference)        (Mock/Zero-Cost Fallback)
-         │                        │                        │
-         └────────────────────────┴────────────────────────┘
-                                  │ (On 429 / 5xx / Timeout)
-                                  ▼
-                      ┌───────────────────────┐
-                      │  Circuit Breaker Sync │
-                      └───────────────────────┘
+POST /v1/chat/completions
+  -> validate request
+  -> try eligible providers in configured order
+  -> record success or failure in the circuit breaker
+  -> return the first valid remote response, or mock fallback
 ```
 
-## 🔑 Key Infrastructure Features
+The current order is `groq_fast`, `cerebras_primary`, `groq_reasoning`, then `mock_fallback`. A provider without credentials is skipped. A failed provider is retried only after the configured cooldown; its next request is a recovery probe.
 
-- **Automated Circuit Breaker State Machine** — Tracks consecutive provider HTTP errors (401, 429, 5xx) and opens the circuit (`UNHEALTHY`) to bypass failing endpoints during recovery cooldown windows.
-- **OpenAI API Compatibility** — Native support for standard OpenAI SDK payloads (`/v1/chat/completions`), allowing drop-in integration with LangChain, LlamaIndex, or custom apps.
-- **Cascading Failover Engine** — Dynamically routes requests across primary (Groq LPU), secondary (Cerebras CS-3), and tertiary providers without dropping active client HTTP sessions.
-- **Real-Time Telemetry & Cost Analytics** — Measures round-trip execution latency, prompt/completion token consumption, and estimates USD cost per API call.
-- **Streamlit Operational Control Center** — Interactive dashboard for monitoring live provider health badges, reviewing execution logs, and stress-testing failover routes in real time.
+## Setup
 
-## 🛠️ Tech Stack
-
-| Category | Technologies |
-|---|---|
-| Framework | Python 3.12, FastAPI, Uvicorn, Pydantic v2 |
-| HTTP & Async | HTTPX (`httpx.AsyncClient`) |
-| Inference Cloud Providers | Groq LPU, Cerebras CS-3 |
-| Observability & Analytics | Streamlit, Plotly, Pandas |
-
-## 📁 Repository Structure
-
-```text
-multi-provider-ai-router/
-│
-├── .env.example              # Template environment file
-├── .gitignore                # Excludes secrets, venv, and cache
-├── requirements.txt          # Project dependencies
-├── README.md                 # System documentation
-├── main.py                   # FastAPI application entry point
-├── dashboard.py              # Streamlit control panel & telemetry UI
-├── test_failover.py          # Automated load & failover test suite
-│
-├── config/
-│   └── settings.py           # Centralized environment & server configurations
-│
-└── app/
-    ├── core/
-    │   └── circuit_breaker.py # Circuit breaker state tracking engine
-    │
-    ├── schemas/
-    │   └── requests.py        # Pydantic API schemas & usage models
-    │
-    └── services/
-        └── provider_client.py # Multi-provider client & fallback handler
-```
-
-## 🚀 Quickstart Guide
-
-### 1. Clone & Set Up Environment
+Python 3.10 or newer is required.
 
 ```powershell
-git clone https://github.com/Danny26y/Multi-Provider-AI-Router
-cd multi-provider-ai-router
-
-# Create and activate virtual environment
-python -m venv venv
-.\venv\Scripts\Activate.ps1   # Windows PowerShell
-# source venv/bin/activate    # Linux/macOS
-```
-
-### 2. Install Dependencies
-
-```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+Copy-Item .env.example .env
 ```
 
-### 3. Configure API Keys
-
-Create a `.env` file in the project root:
+Set only the provider credentials you intend to use in `.env`:
 
 ```ini
-GROQ_API_KEY=gsk_your_groq_api_key_here
-CEREBRAS_API_KEY=csk_your_cerebras_api_key_here
+GROQ_API_KEY=your_groq_api_key
+CEREBRAS_API_KEY=your_cerebras_api_key
 ```
 
-### 4. Run the FastAPI Proxy Gateway
+Do not commit `.env`; it is excluded by `.gitignore`.
+
+## Run
 
 ```powershell
 python main.py
 ```
 
-The gateway runs at `http://localhost:8000`. You can inspect the interactive OpenAPI documentation at `http://localhost:8000/docs`.
+The API is available at `http://localhost:8000`, with interactive docs at `http://localhost:8000/docs`.
 
-### 5. Launch the Streamlit Monitoring Dashboard
-
-In a separate terminal (with virtual environment activated):
+In another terminal, launch the optional monitoring dashboard:
 
 ```powershell
 streamlit run dashboard.py
 ```
 
-## 🧪 Testing Failover Execution
+## API example
 
-To verify that the proxy automatically routes around failing endpoints, run the included load testing suite:
+```bash
+curl -X POST "http://localhost:8000/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Explain the circuit breaker pattern."}]}'
+```
+
+Responses retain `provider_used` and add:
+
+- `fallback_used`: `true` only when the mock fallback generated the response.
+- `routing_diagnostics`: non-sensitive provider outcomes such as `missing_credentials`, `http_error`, `timeout`, or `circuit_open`.
+
+The API never returns raw provider exception messages or response bodies to clients.
+
+## Current limitations
+
+- A request's `model` field is accepted for OpenAI-style compatibility, but routing uses each provider's configured default model. Per-request model selection is not implemented.
+- `stream: true` is explicitly rejected with HTTP 400; streaming responses are not implemented.
+- The mock fallback is deterministic and does not call an LLM. A 200 response from it does not verify that any real provider works.
+- Provider availability depends on valid credentials, provider account access, and network connectivity. This repository does not claim live-provider verification.
+
+## Tests
+
+Run deterministic tests without API keys or paid requests:
+
+```powershell
+pytest
+python -m compileall app config main.py
+```
+
+`test_failover.py` is a manual smoke/load script for a separately running local API:
 
 ```powershell
 python test_failover.py
 ```
 
-**What happens during the test:**
+It can exercise live configuration, but is not an automated or deterministic test suite.
 
-1. Requests hit the primary provider (`groq_fast`).
-2. If `groq_fast` encounters simulated rate limits or errors, the circuit breaker flags it as `UNHEALTHY`.
-3. The gateway automatically reroutes subsequent requests to `cerebras_primary` or `mock_fallback` with zero dropped requests.
+## Health endpoint
 
-## 📡 API Example Usage
+`GET /health` returns `online` and in-memory circuit-breaker state. The state resets when the application process restarts.
 
-You can use standard `curl` or `requests` to query the gateway:
+## Portfolio next step
 
-```bash
-curl -X POST "http://localhost:8000/v1/chat/completions" \
-     -H "Content-Type: application/json" \
-     -d '{
-       "messages": [
-         {"role": "user", "content": "Explain circuit breaker pattern in 2 sentences."}
-       ]
-     }'
-```
+Add a small Docker run path and GitHub Actions workflow after reviewing the stabilized local test results. Neither is included yet so the packaging change remains focused.

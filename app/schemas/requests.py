@@ -24,6 +24,13 @@ class ChatCompletionResponseChoice(BaseModel):
     message: ChatMessage
     finish_reason: Optional[str] = "stop"
 
+
+class ProviderDiagnostic(BaseModel):
+    provider: str
+    outcome: str
+    category: Optional[str] = None
+
+
 class ChatCompletionResponse(BaseModel):
     id: str
     object: str = "chat.completion"
@@ -31,5 +38,7 @@ class ChatCompletionResponse(BaseModel):
     model: str
     choices: List[ChatCompletionResponseChoice]
     provider_used: str
+    fallback_used: bool = False
+    routing_diagnostics: List[ProviderDiagnostic] = Field(default_factory=list)
     latency_seconds: float = 0.0
     usage: UsageStats = Field(default_factory=UsageStats)

@@ -1,4 +1,6 @@
-import sys, os
+import logging
+import os
+import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from fastapi import FastAPI, HTTPException, status
@@ -13,6 +15,7 @@ app = FastAPI(
 )
 
 provider_client = MultiProviderClient()
+logger = logging.getLogger(__name__)
 
 @app.get("/health")
 async def health_check():
@@ -22,13 +25,19 @@ async def health_check():
     }
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completions(request: ChatCompletionRequest):
+    if request.stream:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Streaming responses are not supported.",
+        )
     try:
         response = await provider_client.execute_chat_completion(request)
         return response
-    except Exception as e:
+    except Exception:
+        logger.error("Chat completion failed after all eligible providers were attempted.")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"All configured AI providers failed: {str(e)}"
+            detail="No AI provider is currently available."
         )
 
 
