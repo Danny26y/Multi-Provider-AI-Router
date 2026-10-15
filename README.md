@@ -48,6 +48,42 @@ In another terminal, launch the optional monitoring dashboard:
 streamlit run dashboard.py
 ```
 
+## Docker
+
+Build the image from the repository root:
+
+```powershell
+docker build -t multi-provider-ai-router .
+```
+
+Run it without credentials to exercise the deterministic mock fallback:
+
+```powershell
+docker run --rm --name multi-provider-ai-router -p 8000:8000 multi-provider-ai-router
+```
+
+Pass provider configuration only at runtime. This reads values from a local `.env` file without copying that file into the image:
+
+```powershell
+docker run --rm --name multi-provider-ai-router -p 8000:8000 --env-file .env multi-provider-ai-router
+```
+
+Alternatively, provide individual values such as `-e GROQ_API_KEY=...`. Do not place API keys in the `Dockerfile`, image tag, or source control.
+
+After the container starts, verify the health endpoint from another terminal:
+
+```powershell
+Invoke-RestMethod http://localhost:8000/health
+```
+
+Stop a foreground container with `Ctrl+C`. If it was started detached, run:
+
+```powershell
+docker stop multi-provider-ai-router
+```
+
+The image runs the application as an unprivileged `appuser` and exposes container port `8000`; `-p 8000:8000` maps it to `http://localhost:8000` on the host.
+
 ## API example
 
 ```bash
