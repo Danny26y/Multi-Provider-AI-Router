@@ -22,6 +22,7 @@ class CircuitBreaker:
             self._states[provider_name] = {
                 "failures": 0,
                 "last_failure": 0.0,
+                "cooldown_until": 0.0,
                 "status": ProviderStatus.HEALTHY,
                 "probe_in_flight": False,
             }
@@ -35,7 +36,7 @@ class CircuitBreaker:
             if state["status"] == ProviderStatus.DEGRADED:
                 return False
 
-            if time.monotonic() - state["last_failure"] < self.recovery_time_seconds:
+            if time.monotonic() < state["cooldown_until"]:
                 return False
 
             state["status"] = ProviderStatus.DEGRADED
@@ -49,10 +50,17 @@ class CircuitBreaker:
             state["status"] = ProviderStatus.HEALTHY
             state["probe_in_flight"] = False
 
-    def record_failure(self, provider_name: str, force_open: bool = False) -> None:
+    def record_failure(
+        self,
+        provider_name: str,
+        force_open: bool = False,
+        retry_after_seconds: float | None = None,
+    ) -> None:
         with self._lock:
             state = self._get_provider_state(provider_name)
             state["last_failure"] = time.monotonic()
+            cooldown = max(self.recovery_time_seconds, retry_after_seconds or 0.0)
+            state["cooldown_until"] = state["last_failure"] + cooldown
             state["probe_in_flight"] = False
 
             if state["status"] == ProviderStatus.DEGRADED or force_open:

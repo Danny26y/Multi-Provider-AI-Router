@@ -66,3 +66,13 @@ def test_provider_failure_returns_generic_service_error(monkeypatch):
 
     assert error.value.status_code == 503
     assert error.value.detail == "No AI provider is currently available."
+
+
+def test_in_process_rate_limiter_returns_retry_after():
+    limiter = main.ClientRequestLimiter(requests_per_minute=1, max_concurrent_requests=1)
+
+    async def check_limit():
+        assert await limiter.check_rate_limit("client") is None
+        assert await limiter.check_rate_limit("client") is not None
+
+    asyncio.run(check_limit())

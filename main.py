@@ -1,5 +1,10 @@
 import hmac
 import logging
+import time
+from collections import defaultdict, deque
+from contextlib import asynccontextmanager
+
+import asyncio
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
@@ -11,14 +16,57 @@ from app.services.provider_client import MultiProviderClient
 from config.settings import settings
 
 
+logger = logging.getLogger(__name__)
+provider_client = MultiProviderClient()
+
+
+class ClientRequestLimiter:
+    def __init__(self, requests_per_minute: int, max_concurrent_requests: int):
+        self.requests_per_minute = requests_per_minute
+        self._timestamps: dict[str, deque[float]] = defaultdict(deque)
+        self._lock = asyncio.Lock()
+        self._semaphore = asyncio.Semaphore(max_concurrent_requests)
+
+    async def check_rate_limit(self, client_id: str) -> int | None:
+        now = time.monotonic()
+        async with self._lock:
+            timestamps = self._timestamps[client_id]
+            while timestamps and now - timestamps[0] >= 60:
+                timestamps.popleft()
+            if len(timestamps) >= self.requests_per_minute:
+                return max(1, int(60 - (now - timestamps[0])))
+            timestamps.append(now)
+            return None
+
+    async def acquire(self) -> None:
+        await self._semaphore.acquire()
+
+    def release(self) -> None:
+        self._semaphore.release()
+
+
+rate_limiter = ClientRequestLimiter(
+    settings.CLIENT_RATE_LIMIT_PER_MINUTE,
+    settings.MAX_CONCURRENT_REQUESTS,
+)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    await provider_client.start()
+    try:
+        yield
+    finally:
+        await provider_client.close()
+
+
 app = FastAPI(
     title="Enterprise AI Multi-Provider Proxy",
     description="AI routing proxy with failover controls and circuit breakers",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
-provider_client = MultiProviderClient()
-logger = logging.getLogger(__name__)
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
@@ -53,6 +101,22 @@ def require_api_key(api_key: str | None = Depends(api_key_header)) -> None:
         )
 
 
+async def enforce_client_limits(request: Request):
+    client_id = request.client.host if request.client else "unknown"
+    retry_after_seconds = await rate_limiter.check_rate_limit(client_id)
+    if retry_after_seconds is not None:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Rate limit exceeded.",
+            headers={"Retry-After": str(retry_after_seconds)},
+        )
+    await rate_limiter.acquire()
+    try:
+        yield
+    finally:
+        rate_limiter.release()
+
+
 @app.get("/health/live")
 async def liveness_check():
     return {"status": "online"}
@@ -70,6 +134,7 @@ async def health_check():
 async def chat_completions(
     request: ChatCompletionRequest,
     _: None = Depends(require_api_key),
+    __: None = Depends(enforce_client_limits),
 ):
     if request.stream:
         raise HTTPException(

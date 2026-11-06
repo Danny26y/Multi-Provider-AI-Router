@@ -1,5 +1,8 @@
+import asyncio
 import time
-from typing import Tuple, Union
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from typing import Optional, Union
 
 import httpx
 from pydantic import ValidationError
@@ -11,28 +14,44 @@ from config.settings import settings
 
 class MultiProviderClient:
     def __init__(self):
+        self.http_client: Optional[httpx.AsyncClient] = None
         self.mock_fallback_enabled = settings.mock_fallback_enabled
-        self.provider_configs = {
+        provider_configs = {
             "groq_fast": {
                 "base_url": settings.GROQ_BASE_URL,
                 "api_key": settings.GROQ_API_KEY,
-                "default_model": "llama-3.1-8b-instant",
+                "default_model": settings.GROQ_FAST_MODEL,
             },
             "cerebras_primary": {
                 "base_url": settings.CEREBRAS_BASE_URL,
                 "api_key": settings.CEREBRAS_API_KEY,
-                "default_model": "zai-glm-4.7",
+                "default_model": settings.CEREBRAS_PRIMARY_MODEL,
             },
             "groq_reasoning": {
                 "base_url": settings.GROQ_BASE_URL,
                 "api_key": settings.GROQ_API_KEY,
-                "default_model": "llama-3.3-70b-versatile",
+                "default_model": settings.GROQ_REASONING_MODEL,
             },
             "mock_fallback": {"is_mock": True},
         }
+        self.provider_configs = {
+            provider_name: provider_configs[provider_name]
+            for provider_name in settings.PROVIDER_ORDER
+            if provider_name in provider_configs
+        }
+
+    async def start(self) -> None:
+        if self.http_client is None:
+            self.http_client = httpx.AsyncClient()
+
+    async def close(self) -> None:
+        if self.http_client is not None:
+            await self.http_client.aclose()
+            self.http_client = None
 
     async def execute_chat_completion(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
         diagnostics = []
+        deadline = time.monotonic() + settings.TOTAL_REQUEST_TIMEOUT_SECONDS
 
         for provider_name, config in self.provider_configs.items():
             if config.get("is_mock"):
@@ -40,8 +59,12 @@ class MultiProviderClient:
                     diagnostics.append({"provider": provider_name, "outcome": "skipped", "category": "fallback_disabled"})
                     continue
                 diagnostics.append({"provider": provider_name, "outcome": "success", "category": "mock_fallback"})
-                return self._generate_mock_response(request, provider_name, diagnostics)
+                return self._generate_mock_response(provider_name, diagnostics)
 
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                diagnostics.append({"provider": provider_name, "outcome": "skipped", "category": "deadline_exceeded"})
+                break
             if request.model and request.model != config["default_model"]:
                 diagnostics.append({"provider": provider_name, "outcome": "skipped", "category": "model_not_supported"})
                 continue
@@ -53,13 +76,13 @@ class MultiProviderClient:
                 continue
 
             started_at = time.monotonic()
-            success, response_or_status, category, retryable = await self._send_http_request(config, request)
+            result = await self._send_http_request(config, request, remaining_seconds)
             latency = round(time.monotonic() - started_at, 3)
 
-            if success:
+            if result[0]:
                 try:
                     response = self._build_response(
-                        response_or_status,
+                        result[1],
                         config,
                         provider_name,
                         request,
@@ -67,16 +90,20 @@ class MultiProviderClient:
                         diagnostics + [{"provider": provider_name, "outcome": "success"}],
                     )
                 except (AttributeError, TypeError, ValidationError, ValueError):
-                    if retryable:
-                        circuit_breaker.record_failure(provider_name)
+                    circuit_breaker.record_failure(provider_name)
                     diagnostics.append({"provider": provider_name, "outcome": "failed", "category": "invalid_response"})
                     continue
 
                 circuit_breaker.record_success(provider_name)
                 return response
 
+            _, _, category, retryable, retry_after_seconds = result
             if retryable:
-                circuit_breaker.record_failure(provider_name, force_open=category == "rate_limited")
+                circuit_breaker.record_failure(
+                    provider_name,
+                    force_open=category == "rate_limited",
+                    retry_after_seconds=retry_after_seconds,
+                )
             diagnostics.append({"provider": provider_name, "outcome": "failed", "category": category})
 
         raise RuntimeError("No eligible AI provider produced a valid response.")
@@ -97,11 +124,11 @@ class MultiProviderClient:
         raw_usage = response_data.get("usage") or {}
         if not isinstance(raw_usage, dict):
             raise ValueError("Upstream usage must be an object when provided.")
-        prompt_tokens = raw_usage.get("prompt_tokens", 0)
-        completion_tokens = raw_usage.get("completion_tokens", 0)
-        total_tokens = raw_usage.get("total_tokens", prompt_tokens + completion_tokens)
-
-        if total_tokens == 0:
+        token_values = [raw_usage.get("prompt_tokens"), raw_usage.get("completion_tokens"), raw_usage.get("total_tokens")]
+        has_actual_usage = all(isinstance(value, int) and value >= 0 for value in token_values)
+        if has_actual_usage:
+            prompt_tokens, completion_tokens, total_tokens = token_values
+        else:
             output_text = choices[0].get("message", {}).get("content", "")
             if not isinstance(output_text, str):
                 raise ValueError("Upstream choice content must be text.")
@@ -110,10 +137,12 @@ class MultiProviderClient:
             completion_tokens = max(1, len(output_text) // 4)
             total_tokens = prompt_tokens + completion_tokens
 
+        model = response_data.get("model", config["default_model"])
+        price_per_million = settings.MODEL_PRICES_USD_PER_MILLION_TOKENS.get(model, 0.0)
         return ChatCompletionResponse(
             id=response_data.get("id", f"chatcmpl-{int(time.time())}"),
             created=response_data.get("created", int(time.time())),
-            model=response_data.get("model", config["default_model"]),
+            model=model,
             choices=choices,
             provider_used=provider_name,
             fallback_used=False,
@@ -123,13 +152,21 @@ class MultiProviderClient:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": total_tokens,
-                "estimated_cost_usd": round((total_tokens / 1_000_000) * 0.05, 6),
+                "estimated_cost_usd": round((total_tokens / 1_000_000) * price_per_million, 6),
+                "token_usage_is_estimated": not has_actual_usage,
+                "cost_is_estimated": True,
             },
         )
 
     async def _send_http_request(
-        self, config: dict, request: ChatCompletionRequest
-    ) -> Tuple[bool, Union[dict, int], str, bool]:
+        self,
+        config: dict,
+        request: ChatCompletionRequest,
+        remaining_seconds: float,
+    ) -> tuple[bool, Union[dict, int], str, bool, Optional[float]]:
+        if self.http_client is None:
+            raise RuntimeError("Provider HTTP client has not been started.")
+
         url = f"{config['base_url']}/chat/completions"
         headers = {"Authorization": f"Bearer {config['api_key']}", "Content-Type": "application/json"}
         payload = {
@@ -138,34 +175,51 @@ class MultiProviderClient:
             "temperature": request.temperature,
             "max_tokens": request.max_tokens,
         }
-
-        async with httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT_SECONDS) as client:
-            try:
-                response = await client.post(url, headers=headers, json=payload)
-            except httpx.TimeoutException:
-                return False, 504, "timeout", True
-            except httpx.HTTPError:
-                return False, 502, "connection_error", True
+        timeout = httpx.Timeout(
+            connect=min(settings.REQUEST_CONNECT_TIMEOUT_SECONDS, remaining_seconds),
+            read=min(settings.REQUEST_READ_TIMEOUT_SECONDS, remaining_seconds),
+            write=min(settings.REQUEST_WRITE_TIMEOUT_SECONDS, remaining_seconds),
+            pool=min(settings.REQUEST_POOL_TIMEOUT_SECONDS, remaining_seconds),
+        )
+        try:
+            response = await asyncio.wait_for(
+                self.http_client.post(url, headers=headers, json=payload, timeout=timeout),
+                timeout=remaining_seconds,
+            )
+        except (asyncio.TimeoutError, httpx.TimeoutException):
+            return False, 504, "timeout", True, None
+        except httpx.HTTPError:
+            return False, 502, "connection_error", True, None
 
         if response.status_code == 200:
             try:
-                return True, response.json(), "success", True
+                return True, response.json(), "success", True, None
             except ValueError:
-                return False, 502, "invalid_response", True
+                return False, 502, "invalid_response", True, None
         if response.status_code == 429:
-            return False, 429, "rate_limited", True
+            return False, 429, "rate_limited", True, self._parse_retry_after(response.headers.get("Retry-After"))
         if 500 <= response.status_code <= 599:
-            return False, response.status_code, "server_error", True
+            return False, response.status_code, "server_error", True, None
         if response.status_code in {401, 403}:
-            return False, response.status_code, "auth_error", False
-        return False, response.status_code, "invalid_request", False
+            return False, response.status_code, "auth_error", False, None
+        return False, response.status_code, "invalid_request", False, None
 
-    def _generate_mock_response(
-        self,
-        request: ChatCompletionRequest,
-        provider_name: str,
-        diagnostics: list[dict],
-    ) -> ChatCompletionResponse:
+    def _parse_retry_after(self, value: Optional[str]) -> Optional[float]:
+        if not value:
+            return None
+        try:
+            retry_after = float(value)
+        except ValueError:
+            try:
+                retry_date = parsedate_to_datetime(value)
+                retry_after = (retry_date - datetime.now(timezone.utc)).total_seconds()
+            except (TypeError, ValueError):
+                return None
+        if retry_after <= 0:
+            return None
+        return min(retry_after, settings.MAX_UPSTREAM_RETRY_AFTER_SECONDS)
+
+    def _generate_mock_response(self, provider_name: str, diagnostics: list[dict]) -> ChatCompletionResponse:
         return ChatCompletionResponse(
             id=f"chatcmpl-mock-{int(time.time())}",
             created=int(time.time()),
@@ -189,5 +243,7 @@ class MultiProviderClient:
                 "completion_tokens": 25,
                 "total_tokens": 35,
                 "estimated_cost_usd": 0.0,
+                "token_usage_is_estimated": True,
+                "cost_is_estimated": True,
             },
         )

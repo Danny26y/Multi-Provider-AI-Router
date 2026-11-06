@@ -1,8 +1,9 @@
 import asyncio
 
-from app.core.circuit_breaker import circuit_breaker
+from app.core.circuit_breaker import ProviderStatus, circuit_breaker
 from app.schemas.requests import ChatCompletionRequest
 from app.services.provider_client import MultiProviderClient
+from config.settings import settings
 
 
 def request(**kwargs):
@@ -54,9 +55,9 @@ def test_provider_failures_follow_configured_order_then_fallback(monkeypatch):
     }
     attempted = []
 
-    async def fake_send(config, _request):
+    async def fake_send(config, _request, _remaining_seconds):
         attempted.append(config["default_model"])
-        return False, 503, "server_error", True
+        return False, 503, "server_error", True, None
 
     monkeypatch.setattr(client, "_send_http_request", fake_send)
     response = asyncio.run(client.execute_chat_completion(request()))
@@ -75,14 +76,16 @@ def test_non_retryable_provider_failure_does_not_open_circuit(monkeypatch):
         "mock_fallback": {"is_mock": True},
     }
 
-    async def fake_send(_config, _request):
-        return False, 401, "auth_error", False
+    async def fake_send(_config, _request, _remaining_seconds):
+        return False, 401, "auth_error", False, None
 
     monkeypatch.setattr(client, "_send_http_request", fake_send)
     response = asyncio.run(client.execute_chat_completion(request()))
 
     assert response.provider_used == "mock_fallback"
-    assert "first" not in circuit_breaker._states
+    state = circuit_breaker.snapshot()["first"]
+    assert state["failures"] == 0
+    assert state["status"] == ProviderStatus.HEALTHY
 
 
 def test_malformed_upstream_response_fails_over(monkeypatch):
@@ -94,8 +97,8 @@ def test_malformed_upstream_response_fails_over(monkeypatch):
         "mock_fallback": {"is_mock": True},
     }
 
-    async def fake_send(_config, _request):
-        return True, {"id": "bad", "choices": []}, "success", True
+    async def fake_send(_config, _request, _remaining_seconds):
+        return True, {"id": "bad", "choices": []}, "success", True, None
 
     monkeypatch.setattr(client, "_send_http_request", fake_send)
     response = asyncio.run(client.execute_chat_completion(request()))
@@ -113,7 +116,7 @@ def test_explicit_model_routes_only_to_compatible_provider(monkeypatch):
     }
     attempted = []
 
-    async def fake_send(config, _request):
+    async def fake_send(config, _request, _remaining_seconds):
         attempted.append(config["default_model"])
         return True, {
             "id": "provider-response",
@@ -121,10 +124,54 @@ def test_explicit_model_routes_only_to_compatible_provider(monkeypatch):
             "model": config["default_model"],
             "choices": [{"message": {"role": "assistant", "content": "Hi"}}],
             "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
-        }, "success", True
+        }, "success", True, None
 
     monkeypatch.setattr(client, "_send_http_request", fake_send)
     response = asyncio.run(client.execute_chat_completion(request(model="zai-glm-4.7")))
 
     assert attempted == ["zai-glm-4.7"]
     assert response.provider_used == "second"
+
+
+def test_http_client_is_reused_until_lifespan_shutdown():
+    client = MultiProviderClient()
+
+    async def manage_client():
+        await client.start()
+        first_client = client.http_client
+        await client.start()
+        assert client.http_client is first_client
+        await client.close()
+        assert client.http_client is None
+
+    asyncio.run(manage_client())
+
+
+def test_actual_usage_and_configured_price_are_reported(monkeypatch):
+    client = MultiProviderClient()
+    monkeypatch.setattr(settings, "MODEL_PRICES_USD_PER_MILLION_TOKENS", {"test-model": 2.0})
+    response = client._build_response(
+        {
+            "id": "provider-response",
+            "created": 1,
+            "model": "test-model",
+            "choices": [{"message": {"role": "assistant", "content": "Hi"}}],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
+        },
+        {"default_model": "test-model"},
+        "provider",
+        request(),
+        0.1,
+        [],
+    )
+
+    assert response.usage.token_usage_is_estimated is False
+    assert response.usage.estimated_cost_usd == 0.00001
+
+
+def test_retry_after_is_capped_to_configured_limit(monkeypatch):
+    client = MultiProviderClient()
+    monkeypatch.setattr(settings, "MAX_UPSTREAM_RETRY_AFTER_SECONDS", 10.0)
+
+    assert client._parse_retry_after("20") == 10.0
+    assert client._parse_retry_after("not-a-date") is None
