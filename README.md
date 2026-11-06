@@ -1,40 +1,25 @@
 # Multi-Provider AI Router
 
-## 1. Overview and explicit scope
+## Overview
 
-This FastAPI gateway tries configured AI providers in order, tracks failures in an in-memory circuit breaker, and returns a deterministic local mock response when no eligible remote provider succeeds. It exposes `POST /v1/chat/completions` and `GET /health`.
+This FastAPI gateway routes chat-completion requests across configured AI providers, applies circuit-breaker controls, and can use a deterministic mock fallback for local development and tests. It exposes `POST /v1/chat/completions`, public `GET /health/live`, and diagnostic `GET /health` endpoints.
 
-The project demonstrates routing, failure handling, diagnostics, tests, Docker packaging, and CI. It is not presented as a production-ready AI platform.
+The project demonstrates secure request handling, provider routing, deterministic tests, Docker packaging, and CI. It is not presented as production-ready.
 
-## 2. Architecture and routing sequence
+## Routing and circuit breakers
 
-```text
-Client -> FastAPI -> eligible providers in order -> first valid response
-                                              \-> mock fallback
-```
+Providers are evaluated in this order: `groq_fast`, `cerebras_primary`, `groq_reasoning`, then the optional `mock_fallback`.
 
-The configured order is:
+- Providers without credentials, with open circuits, or incompatible with an explicitly requested model are skipped.
+- A request is sent at most once to an eligible provider; there is no retry loop.
+- Timeouts, connection errors, HTTP 429, 5xx responses, and malformed upstream responses are retryable failures and permit failover.
+- Upstream authentication and invalid-request responses do not open a circuit.
+- Three retryable failures open a circuit; HTTP 429 opens it immediately.
+- After the 30-second default cooldown, exactly one recovery probe is allowed. A successful probe restores the provider; a failed probe reopens the circuit.
 
-1. `groq_fast`
-2. `cerebras_primary`
-3. `groq_reasoning`
-4. `mock_fallback`
+Circuit-breaker state is process-local and resets when the application restarts.
 
-Remote providers without credentials are skipped. For an eligible remote provider, the router sends one request and either returns its valid response or records the failure before moving to the next provider. The mock fallback does not call an LLM.
-
-## 3. Circuit-breaker behavior
-
-Circuit-breaker state is held in memory per provider and resets when the process restarts.
-
-- Three ordinary failures open a provider's circuit.
-- An HTTP `429` opens its circuit immediately.
-- An open circuit is bypassed for the default 30-second cooldown.
-- After cooldown, the next eligibility check permits a recovery probe in a degraded state.
-- A successful probe resets the provider to healthy; a failed probe reopens its circuit.
-
-There is no automatic request retry loop. Each provider is attempted at most once during a routing pass when it is eligible.
-
-## 4. Local setup and configuration
+## Setup and configuration
 
 Python 3.10 or newer is required.
 
@@ -45,109 +30,71 @@ python -m pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-Configure only the providers you intend to use:
+Set a long, random router key before serving chat requests:
 
 ```ini
+ROUTER_API_KEY=generate_a_long_random_value
+APP_ENV=development
+ENABLE_MOCK_FALLBACK=false
 GROQ_API_KEY=your_groq_api_key
 CEREBRAS_API_KEY=your_cerebras_api_key
 REQUEST_TIMEOUT_SECONDS=10
 ```
 
-Keep `.env` local. It is excluded by `.gitignore` and `.dockerignore`.
+`X-API-Key` authentication is required for `POST /v1/chat/completions`. If `ROUTER_API_KEY` is absent, the endpoint fails closed with HTTP 503. Keep `.env` local; it is excluded by `.gitignore` and `.dockerignore`.
 
-## 5. Run locally and API example/response
+The mock fallback is disabled by default. It can be enabled only when `APP_ENV` is `development` or `testing` and `ENABLE_MOCK_FALLBACK=true`. Production requests receive HTTP 503 when no real provider returns a valid response.
 
-Start the API:
+## Run and use the API
 
 ```powershell
 python main.py
 ```
 
-The server listens at `http://localhost:8000`; interactive OpenAPI documentation is at `http://localhost:8000/docs`.
+The server listens at `http://localhost:8000`; OpenAPI documentation is at `http://localhost:8000/docs`.
 
 ```bash
 curl -X POST "http://localhost:8000/v1/chat/completions" \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: your_router_api_key" \
   -d '{"messages":[{"role":"user","content":"Explain the circuit breaker pattern."}]}'
 ```
 
-With no remote credentials, the request returns the mock fallback. The values below are representative; identifiers, timestamps, and latency are generated at runtime.
+Supported message roles are `system`, `user`, and `assistant`. Requests require at least one nonempty message, constrain message and total content size, accept temperatures from `0` to `2`, and accept `max_tokens` from `1` to `4096`. Extra fields are rejected. Supported explicit models are `llama-3.1-8b-instant`, `zai-glm-4.7`, and `llama-3.3-70b-versatile`; omit `model` to preserve provider-order failover. Streaming is not supported.
 
-```json
-{
-  "id": "chatcmpl-mock-1700000000",
-  "object": "chat.completion",
-  "created": 1700000000,
-  "model": "mock-local-fallback",
-  "choices": [
-    {
-      "index": 0,
-      "message": {
-        "role": "assistant",
-        "content": "[SYSTEM FALLBACK]: All eligible remote providers were unavailable. This response was served by the local mock fallback."
-      },
-      "finish_reason": "stop"
-    }
-  ],
-  "provider_used": "mock_fallback",
-  "fallback_used": true,
-  "routing_diagnostics": [
-    {"provider": "groq_fast", "outcome": "skipped", "category": "missing_credentials"},
-    {"provider": "cerebras_primary", "outcome": "skipped", "category": "missing_credentials"},
-    {"provider": "groq_reasoning", "outcome": "skipped", "category": "missing_credentials"},
-    {"provider": "mock_fallback", "outcome": "success", "category": "mock_fallback"}
-  ],
-  "latency_seconds": 0.0,
-  "usage": {
-    "prompt_tokens": 10,
-    "completion_tokens": 25,
-    "total_tokens": 35,
-    "estimated_cost_usd": 0.0
-  }
-}
-```
+When development fallback is enabled and no remote provider is eligible, the response contains `provider_used: "mock_fallback"`, `fallback_used: true`, and non-sensitive `routing_diagnostics`. Real-provider responses set `fallback_used` to `false`. Provider response bodies, API keys, and request content are not included in diagnostics or client-facing errors.
 
-`fallback_used` distinguishes a mock response from a real-provider response. `routing_diagnostics` reports non-sensitive outcomes such as `missing_credentials`, `circuit_open`, `http_error`, `timeout`, and `invalid_response`. Client-facing provider failures return a generic HTTP 503 response.
+## Docker
 
-`model` is accepted for OpenAI-style request compatibility, but the router uses each provider's configured default model. `stream: true` is rejected with HTTP 400 because streaming is not implemented.
-
-## 6. Docker build, runtime configuration, health check, and stop
-
-Build from the repository root:
+Build the non-root Python 3.12 image from the repository root:
 
 ```powershell
 docker build -t multi-provider-ai-router .
 ```
 
-Run without credentials to use the mock fallback:
-
-```powershell
-docker run --rm --name multi-provider-ai-router -p 8000:8000 multi-provider-ai-router
-```
-
-Pass secrets only at runtime. The following command reads local environment values without copying `.env` into the image:
+Run with a local `.env` file; the file is read at runtime and is not copied into the image:
 
 ```powershell
 docker run --rm --name multi-provider-ai-router -p 8000:8000 --env-file .env multi-provider-ai-router
 ```
 
-Verify the running container:
+Verify liveness without credentials:
 
 ```powershell
-Invoke-RestMethod http://localhost:8000/health
+Invoke-RestMethod http://localhost:8000/health/live
 ```
 
-Stop a foreground container with `Ctrl+C`; for a detached container, run:
+Stop a foreground container with `Ctrl+C`; for a detached container, use:
 
 ```powershell
 docker stop multi-provider-ai-router
 ```
 
-The image uses `python:3.12-slim`, runs Uvicorn on `0.0.0.0:8000`, and runs as an unprivileged `appuser`. `-p 8000:8000` maps the container port to the host.
+The image binds Uvicorn to `0.0.0.0:8000` and runs as unprivileged `appuser`; `-p 8000:8000` maps the container port to the host.
 
-## 7. Tests and CI
+## Tests and CI
 
-Run the deterministic local checks without provider credentials or paid API calls:
+Run deterministic checks without provider credentials or paid API calls:
 
 ```powershell
 python -m compileall app config main.py
@@ -155,15 +102,14 @@ python -c "import main"
 python -m pytest -v
 ```
 
-The test suite covers provider ordering, missing credentials, remote-provider failures, mock fallback behavior, safe API errors, and circuit-breaker transitions. `test_failover.py` is a manual local API smoke/load script for a separately running service; it is not a deterministic test suite.
+`test_failover.py` is a manual local API smoke/load script for a separately running service, not a deterministic test suite.
 
-GitHub Actions CI has passed. On pushes and pull requests targeting `main`, it installs `requirements.txt` on Ubuntu with Python 3.12, then runs the same compile, import, and pytest checks.
+GitHub Actions CI runs the compile, import, and pytest checks on Ubuntu with Python 3.12 for pushes and pull requests to `main`.
 
-## 8. Limitations and non-claims
+## Limitations
 
-- Live Groq and Cerebras connectivity has not been verified by this project.
-- Throughput, latency, and availability have not been benchmarked.
-- The application has no authentication, TLS termination, or persistent state.
-- Circuit-breaker state is process-local and resets on restart.
-- Streaming and per-request model selection are not implemented.
-- The mock fallback is a fixed local response, not generated model output.
+- Live Groq and Cerebras connectivity is not verified by this repository.
+- Throughput, latency, and availability are not benchmarked.
+- The service has no TLS termination, persistent state, or streaming support.
+- The mock fallback is fixed text, not generated model output.
+- Model selection is limited to the configured provider defaults; an explicit model narrows routing to compatible providers.

@@ -1,53 +1,51 @@
 from app.core.circuit_breaker import CircuitBreaker, ProviderStatus
 
 
-def test_opens_after_failure_threshold_and_rejects_until_cooldown(monkeypatch):
+def test_opens_after_failure_threshold_and_allows_one_recovery_probe(monkeypatch):
     clock = [100.0]
-    monkeypatch.setattr("app.core.circuit_breaker.time.time", lambda: clock[0])
-    breaker = CircuitBreaker(failure_threshold=2, recovery_time_seconds=30)
+    monkeypatch.setattr("app.core.circuit_breaker.time.monotonic", lambda: clock[0])
+    breaker = CircuitBreaker(failure_threshold=3, recovery_time_seconds=30)
 
+    breaker.record_failure("provider")
+    breaker.record_failure("provider")
     assert breaker.is_available("provider")
-    breaker.record_failure("provider", 500)
-    assert breaker.is_available("provider")
-    breaker.record_failure("provider", 500)
-
-    assert breaker._states["provider"]["status"] == ProviderStatus.UNHEALTHY
+    breaker.record_failure("provider")
     assert not breaker.is_available("provider")
 
     clock[0] += 30
     assert breaker.is_available("provider")
     assert breaker._states["provider"]["status"] == ProviderStatus.DEGRADED
+    assert not breaker.is_available("provider")
 
 
 def test_successful_recovery_resets_breaker(monkeypatch):
     clock = [100.0]
-    monkeypatch.setattr("app.core.circuit_breaker.time.time", lambda: clock[0])
+    monkeypatch.setattr("app.core.circuit_breaker.time.monotonic", lambda: clock[0])
     breaker = CircuitBreaker(failure_threshold=1, recovery_time_seconds=10)
 
-    breaker.record_failure("provider", 500)
+    breaker.record_failure("provider")
     clock[0] += 10
     assert breaker.is_available("provider")
     breaker.record_success("provider")
 
-    state = breaker._states["provider"]
+    state = breaker.snapshot()["provider"]
     assert state["status"] == ProviderStatus.HEALTHY
     assert state["failures"] == 0
     assert breaker.is_available("provider")
 
 
-def test_failed_recovery_probe_reopens_and_can_retry_later(monkeypatch):
+def test_failed_recovery_probe_and_rate_limit_open_circuit_immediately(monkeypatch):
     clock = [100.0]
-    monkeypatch.setattr("app.core.circuit_breaker.time.time", lambda: clock[0])
-    breaker = CircuitBreaker(failure_threshold=2, recovery_time_seconds=10)
+    monkeypatch.setattr("app.core.circuit_breaker.time.monotonic", lambda: clock[0])
+    breaker = CircuitBreaker(failure_threshold=3, recovery_time_seconds=10)
 
-    breaker.record_failure("provider", 500)
-    breaker.record_failure("provider", 500)
+    breaker.record_failure("rate_limited", force_open=True)
+    assert not breaker.is_available("rate_limited")
+
+    breaker.record_failure("provider")
+    breaker.record_failure("provider")
+    breaker.record_failure("provider")
     clock[0] += 10
     assert breaker.is_available("provider")
-
-    breaker.record_failure("provider", 500)
-    assert breaker._states["provider"]["status"] == ProviderStatus.UNHEALTHY
+    breaker.record_failure("provider")
     assert not breaker.is_available("provider")
-
-    clock[0] += 10
-    assert breaker.is_available("provider")

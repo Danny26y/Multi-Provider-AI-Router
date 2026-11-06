@@ -11,6 +11,7 @@ from config.settings import settings
 
 class MultiProviderClient:
     def __init__(self):
+        self.mock_fallback_enabled = settings.mock_fallback_enabled
         self.provider_configs = {
             "groq_fast": {
                 "base_url": settings.GROQ_BASE_URL,
@@ -31,33 +32,29 @@ class MultiProviderClient:
         }
 
     async def execute_chat_completion(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
-        attempted_providers = []
         diagnostics = []
 
         for provider_name, config in self.provider_configs.items():
+            if config.get("is_mock"):
+                if not self.mock_fallback_enabled:
+                    diagnostics.append({"provider": provider_name, "outcome": "skipped", "category": "fallback_disabled"})
+                    continue
+                diagnostics.append({"provider": provider_name, "outcome": "success", "category": "mock_fallback"})
+                return self._generate_mock_response(request, provider_name, diagnostics)
+
+            if request.model and request.model != config["default_model"]:
+                diagnostics.append({"provider": provider_name, "outcome": "skipped", "category": "model_not_supported"})
+                continue
             if not circuit_breaker.is_available(provider_name):
                 diagnostics.append({"provider": provider_name, "outcome": "skipped", "category": "circuit_open"})
                 continue
-
-            if not config.get("is_mock") and not config.get("api_key"):
+            if not config.get("api_key"):
                 diagnostics.append({"provider": provider_name, "outcome": "skipped", "category": "missing_credentials"})
                 continue
 
-            attempted_providers.append(provider_name)
-            print(f"[ROUTER]: Routing request to '{provider_name}'.")
-            started_at = time.time()
-
-            if config.get("is_mock"):
-                diagnostics.append({"provider": provider_name, "outcome": "success", "category": "mock_fallback"})
-                return self._generate_mock_response(
-                    request,
-                    provider_name,
-                    latency=round(time.time() - started_at, 3),
-                    diagnostics=diagnostics,
-                )
-
-            success, response_or_status, category = await self._send_http_request(config, request)
-            latency = round(time.time() - started_at, 3)
+            started_at = time.monotonic()
+            success, response_or_status, category, retryable = await self._send_http_request(config, request)
+            latency = round(time.monotonic() - started_at, 3)
 
             if success:
                 try:
@@ -69,18 +66,20 @@ class MultiProviderClient:
                         latency,
                         diagnostics + [{"provider": provider_name, "outcome": "success"}],
                     )
-                except (AttributeError, TypeError, ValidationError):
-                    circuit_breaker.record_failure(provider_name, error_code=502)
+                except (AttributeError, TypeError, ValidationError, ValueError):
+                    if retryable:
+                        circuit_breaker.record_failure(provider_name)
                     diagnostics.append({"provider": provider_name, "outcome": "failed", "category": "invalid_response"})
                     continue
 
                 circuit_breaker.record_success(provider_name)
                 return response
 
-            circuit_breaker.record_failure(provider_name, error_code=response_or_status)
+            if retryable:
+                circuit_breaker.record_failure(provider_name, force_open=category == "rate_limited")
             diagnostics.append({"provider": provider_name, "outcome": "failed", "category": category})
 
-        raise RuntimeError(f"All configured AI providers failed. Tried: {attempted_providers}")
+        raise RuntimeError("No eligible AI provider produced a valid response.")
 
     def _build_response(
         self,
@@ -91,15 +90,21 @@ class MultiProviderClient:
         latency: float,
         diagnostics: list[dict],
     ) -> ChatCompletionResponse:
+        choices = response_data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise ValueError("Upstream response must include at least one choice.")
+
         raw_usage = response_data.get("usage") or {}
+        if not isinstance(raw_usage, dict):
+            raise ValueError("Upstream usage must be an object when provided.")
         prompt_tokens = raw_usage.get("prompt_tokens", 0)
         completion_tokens = raw_usage.get("completion_tokens", 0)
         total_tokens = raw_usage.get("total_tokens", prompt_tokens + completion_tokens)
 
         if total_tokens == 0:
-            output_text = ""
-            if response_data.get("choices"):
-                output_text = response_data["choices"][0].get("message", {}).get("content", "")
+            output_text = choices[0].get("message", {}).get("content", "")
+            if not isinstance(output_text, str):
+                raise ValueError("Upstream choice content must be text.")
             prompt_text = "".join(message.content for message in request.messages)
             prompt_tokens = max(1, len(prompt_text) // 4)
             completion_tokens = max(1, len(output_text) // 4)
@@ -109,7 +114,7 @@ class MultiProviderClient:
             id=response_data.get("id", f"chatcmpl-{int(time.time())}"),
             created=response_data.get("created", int(time.time())),
             model=response_data.get("model", config["default_model"]),
-            choices=response_data.get("choices", []),
+            choices=choices,
             provider_used=provider_name,
             fallback_used=False,
             routing_diagnostics=diagnostics,
@@ -124,11 +129,11 @@ class MultiProviderClient:
 
     async def _send_http_request(
         self, config: dict, request: ChatCompletionRequest
-    ) -> Tuple[bool, Union[dict, int], str]:
+    ) -> Tuple[bool, Union[dict, int], str, bool]:
         url = f"{config['base_url']}/chat/completions"
         headers = {"Authorization": f"Bearer {config['api_key']}", "Content-Type": "application/json"}
         payload = {
-            "model": config["default_model"],
+            "model": request.model or config["default_model"],
             "messages": [message.model_dump() for message in request.messages],
             "temperature": request.temperature,
             "max_tokens": request.max_tokens,
@@ -137,28 +142,29 @@ class MultiProviderClient:
         async with httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT_SECONDS) as client:
             try:
                 response = await client.post(url, headers=headers, json=payload)
-                if response.status_code == 200:
-                    try:
-                        return True, response.json(), "success"
-                    except ValueError:
-                        print(f"[PROVIDER ERROR]: Invalid JSON response from {config['default_model']}.")
-                        return False, 502, "invalid_response"
-
-                print(f"[PROVIDER HTTP ERROR]: {config['default_model']} returned status {response.status_code}.")
-                return False, response.status_code, "http_error"
             except httpx.TimeoutException:
-                print(f"[PROVIDER ERROR]: Timeout calling {config['default_model']}.")
-                return False, 504, "timeout"
+                return False, 504, "timeout", True
             except httpx.HTTPError:
-                print(f"[PROVIDER ERROR]: Connection error calling {config['default_model']}.")
-                return False, 502, "connection_error"
+                return False, 502, "connection_error", True
+
+        if response.status_code == 200:
+            try:
+                return True, response.json(), "success", True
+            except ValueError:
+                return False, 502, "invalid_response", True
+        if response.status_code == 429:
+            return False, 429, "rate_limited", True
+        if 500 <= response.status_code <= 599:
+            return False, response.status_code, "server_error", True
+        if response.status_code in {401, 403}:
+            return False, response.status_code, "auth_error", False
+        return False, response.status_code, "invalid_request", False
 
     def _generate_mock_response(
         self,
         request: ChatCompletionRequest,
         provider_name: str,
-        latency: float = 0.0,
-        diagnostics: list[dict] | None = None,
+        diagnostics: list[dict],
     ) -> ChatCompletionResponse:
         return ChatCompletionResponse(
             id=f"chatcmpl-mock-{int(time.time())}",
@@ -166,8 +172,8 @@ class MultiProviderClient:
             model="mock-local-fallback",
             provider_used=provider_name,
             fallback_used=True,
-            routing_diagnostics=diagnostics or [],
-            latency_seconds=latency,
+            routing_diagnostics=diagnostics,
+            latency_seconds=0.0,
             choices=[
                 {
                     "index": 0,
