@@ -29,6 +29,22 @@ def test_liveness_is_public():
     assert response.json() == {"status": "online"}
 
 
+def test_health_does_not_expose_circuit_state_and_metrics_are_available():
+    health = api_request("GET", "/health")
+    metrics = api_request("GET", "/metrics")
+
+    assert health.status_code == 200
+    assert health.json() == {"status": "online"}
+    assert metrics.status_code == 200
+    assert "ai_router_http_requests_total" in metrics.text
+
+
+def test_request_correlation_id_is_returned():
+    response = api_request("GET", "/health/live", headers={"X-Request-ID": "test-request-id"})
+
+    assert response.headers["X-Request-ID"] == "test-request-id"
+
+
 def test_chat_requires_configured_api_key(monkeypatch):
     monkeypatch.setattr(settings, "ROUTER_API_KEY", "router-test-key")
 
@@ -76,3 +92,11 @@ def test_in_process_rate_limiter_returns_retry_after():
         assert await limiter.check_rate_limit("client") is not None
 
     asyncio.run(check_limit())
+
+
+def test_readiness_reports_unready_without_eligible_configuration(monkeypatch):
+    monkeypatch.setattr(main.provider_client, "is_ready", lambda: False)
+
+    response = api_request("GET", "/health/ready")
+
+    assert response.status_code == 503

@@ -3,6 +3,8 @@ import time
 from enum import Enum
 from typing import Dict
 
+from app.core.metrics import record_circuit_state
+
 
 class ProviderStatus(str, Enum):
     HEALTHY = "healthy"
@@ -32,15 +34,19 @@ class CircuitBreaker:
         with self._lock:
             state = self._get_provider_state(provider_name)
             if state["status"] == ProviderStatus.HEALTHY:
+                record_circuit_state(provider_name, state["status"].value)
                 return True
             if state["status"] == ProviderStatus.DEGRADED:
+                record_circuit_state(provider_name, state["status"].value)
                 return False
 
             if time.monotonic() < state["cooldown_until"]:
+                record_circuit_state(provider_name, state["status"].value)
                 return False
 
             state["status"] = ProviderStatus.DEGRADED
             state["probe_in_flight"] = True
+            record_circuit_state(provider_name, state["status"].value)
             return True
 
     def record_success(self, provider_name: str) -> None:
@@ -49,6 +55,7 @@ class CircuitBreaker:
             state["failures"] = 0
             state["status"] = ProviderStatus.HEALTHY
             state["probe_in_flight"] = False
+            record_circuit_state(provider_name, state["status"].value)
 
     def record_failure(
         self,
@@ -66,11 +73,13 @@ class CircuitBreaker:
             if state["status"] == ProviderStatus.DEGRADED or force_open:
                 state["failures"] = self.failure_threshold
                 state["status"] = ProviderStatus.UNHEALTHY
+                record_circuit_state(provider_name, state["status"].value)
                 return
 
             state["failures"] += 1
             if state["failures"] >= self.failure_threshold:
                 state["status"] = ProviderStatus.UNHEALTHY
+            record_circuit_state(provider_name, state["status"].value)
 
     def snapshot(self) -> Dict[str, dict]:
         with self._lock:

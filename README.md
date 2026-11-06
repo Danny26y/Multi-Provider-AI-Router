@@ -102,6 +102,18 @@ Client limits are in-process and use the connecting client IP: `CLIENT_RATE_LIMI
 
 Provider usage is returned as actual token usage when the upstream response contains complete usage fields. Otherwise the router marks the usage as estimated. `estimated_cost_usd` uses the configured `MODEL_PRICES_USD_PER_MILLION_TOKENS` mapping and is always an estimate.
 
+## Observability
+
+Application logs are JSON records with a request correlation ID. Send `X-Request-ID` to preserve an existing ID, or use the generated ID returned in the response header. Logs and diagnostics contain only safe metadata: provider name, failure category, HTTP status, and latency; they do not include API keys or prompt content.
+
+Prometheus-compatible metrics are exposed at `GET /metrics`:
+
+- `ai_router_http_requests_total` and `ai_router_http_request_duration_seconds`
+- `ai_router_provider_failures_total` and `ai_router_provider_request_duration_seconds`
+- `ai_router_circuit_state` (`healthy=0`, `degraded=1`, `unhealthy=2`)
+
+`GET /health/live` reports whether the process is running. `GET /health/ready` returns 200 only when chat authentication is configured and at least one remote provider or enabled development fallback is available. `GET /health` remains a minimal compatibility status endpoint and does not expose circuit-breaker internals.
+
 ## Tests and CI
 
 Run deterministic checks without provider credentials or paid API calls:
@@ -115,6 +127,8 @@ python -m pytest -v
 `test_failover.py` is a manual local API smoke/load script for a separately running service, not a deterministic test suite.
 
 GitHub Actions CI runs the compile, import, and pytest checks on Ubuntu with Python 3.12 for pushes and pull requests to `main`.
+
+For repeatable load testing against a local mock upstream, follow [benchmarks/README.md](benchmarks/README.md). The harness produces Locust CSV data for throughput, p50, p95, and error rate; no benchmark figures are claimed until a run is recorded.
 
 ## Limitations
 

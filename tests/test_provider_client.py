@@ -1,5 +1,7 @@
 import asyncio
 
+import httpx
+import pytest
 from app.core.circuit_breaker import ProviderStatus, circuit_breaker
 from app.schemas.requests import ChatCompletionRequest
 from app.services.provider_client import MultiProviderClient
@@ -175,3 +177,71 @@ def test_retry_after_is_capped_to_configured_limit(monkeypatch):
 
     assert client._parse_retry_after("20") == 10.0
     assert client._parse_retry_after("not-a-date") is None
+
+
+@pytest.mark.parametrize(
+    ("response", "expected_category", "expected_retryable"),
+    [
+        (httpx.Response(429, headers={"Retry-After": "30"}), "rate_limited", True),
+        (httpx.Response(500), "server_error", True),
+        (httpx.Response(200, content=b"not-json"), "invalid_response", True),
+    ],
+)
+def test_http_transport_classifies_retryable_upstream_responses(response, expected_category, expected_retryable):
+    client = MultiProviderClient()
+
+    async def send_request():
+        client.http_client = httpx.AsyncClient(transport=httpx.MockTransport(lambda _: response))
+        try:
+            return await client._send_http_request(
+                {"base_url": "https://example.test", "api_key": "test", "default_model": "test-model"},
+                request(),
+                5.0,
+            )
+        finally:
+            await client.close()
+
+    result = asyncio.run(send_request())
+
+    assert result[2] == expected_category
+    assert result[3] is expected_retryable
+
+
+def test_http_transport_classifies_timeouts():
+    client = MultiProviderClient()
+
+    async def timeout_handler(_request):
+        raise httpx.ReadTimeout("timeout")
+
+    async def send_request():
+        client.http_client = httpx.AsyncClient(transport=httpx.MockTransport(timeout_handler))
+        try:
+            return await client._send_http_request(
+                {"base_url": "https://example.test", "api_key": "test", "default_model": "test-model"},
+                request(),
+                5.0,
+            )
+        finally:
+            await client.close()
+
+    result = asyncio.run(send_request())
+
+    assert result[2] == "timeout"
+    assert result[3] is True
+
+
+def test_complete_outage_raises_without_enabled_fallback(monkeypatch):
+    circuit_breaker._states.clear()
+    client = MultiProviderClient()
+    client.provider_configs = {
+        "first": {"base_url": "https://example.test", "api_key": "test", "default_model": "first"},
+        "second": {"base_url": "https://example.test", "api_key": "test", "default_model": "second"},
+    }
+
+    async def failed_send(_config, _request, _remaining_seconds):
+        return False, 503, "server_error", True, None
+
+    monkeypatch.setattr(client, "_send_http_request", failed_send)
+
+    with pytest.raises(RuntimeError, match="No eligible AI provider"):
+        asyncio.run(client.execute_chat_completion(request()))

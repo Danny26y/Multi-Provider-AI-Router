@@ -1,4 +1,5 @@
 from app.core.circuit_breaker import CircuitBreaker, ProviderStatus
+from concurrent.futures import ThreadPoolExecutor
 
 
 def test_opens_after_failure_threshold_and_allows_one_recovery_probe(monkeypatch):
@@ -49,3 +50,16 @@ def test_failed_recovery_probe_and_rate_limit_open_circuit_immediately(monkeypat
     assert breaker.is_available("provider")
     breaker.record_failure("provider")
     assert not breaker.is_available("provider")
+
+
+def test_concurrent_half_open_allows_only_one_recovery_probe(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("app.core.circuit_breaker.time.monotonic", lambda: clock[0])
+    breaker = CircuitBreaker(failure_threshold=1, recovery_time_seconds=10)
+    breaker.record_failure("provider")
+    clock[0] += 10
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(lambda _: breaker.is_available("provider"), range(8)))
+
+    assert results.count(True) == 1

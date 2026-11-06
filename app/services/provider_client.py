@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -8,8 +9,13 @@ import httpx
 from pydantic import ValidationError
 
 from app.core.circuit_breaker import circuit_breaker
+from app.core.logging import log_event
+from app.core.metrics import PROVIDER_FAILURES, PROVIDER_LATENCY
 from app.schemas.requests import ChatCompletionRequest, ChatCompletionResponse
 from config.settings import settings
+
+
+logger = logging.getLogger("router.provider")
 
 
 class MultiProviderClient:
@@ -48,6 +54,14 @@ class MultiProviderClient:
         if self.http_client is not None:
             await self.http_client.aclose()
             self.http_client = None
+
+    def is_ready(self) -> bool:
+        has_configured_remote_provider = any(
+            config.get("api_key")
+            for config in self.provider_configs.values()
+            if not config.get("is_mock")
+        )
+        return bool(settings.ROUTER_API_KEY) and (has_configured_remote_provider or self.mock_fallback_enabled)
 
     async def execute_chat_completion(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
         diagnostics = []
@@ -91,10 +105,13 @@ class MultiProviderClient:
                     )
                 except (AttributeError, TypeError, ValidationError, ValueError):
                     circuit_breaker.record_failure(provider_name)
+                    self._record_provider_failure(provider_name, "invalid_response", True)
                     diagnostics.append({"provider": provider_name, "outcome": "failed", "category": "invalid_response"})
                     continue
 
                 circuit_breaker.record_success(provider_name)
+                PROVIDER_LATENCY.labels(provider=provider_name).observe(latency)
+                log_event(logger, logging.INFO, "provider_request_succeeded", provider=provider_name, latency_seconds=latency)
                 return response
 
             _, _, category, retryable, retry_after_seconds = result
@@ -104,9 +121,25 @@ class MultiProviderClient:
                     force_open=category == "rate_limited",
                     retry_after_seconds=retry_after_seconds,
                 )
+            self._record_provider_failure(provider_name, category, retryable)
             diagnostics.append({"provider": provider_name, "outcome": "failed", "category": category})
 
         raise RuntimeError("No eligible AI provider produced a valid response.")
+
+    def _record_provider_failure(self, provider_name: str, category: str, retryable: bool) -> None:
+        PROVIDER_FAILURES.labels(
+            provider=provider_name,
+            category=category,
+            retryable=str(retryable).lower(),
+        ).inc()
+        log_event(
+            logger,
+            logging.WARNING,
+            "provider_request_failed",
+            provider=provider_name,
+            category=category,
+            retryable=retryable,
+        )
 
     def _build_response(
         self,

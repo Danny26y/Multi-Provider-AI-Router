@@ -24,6 +24,7 @@ build/
 dist/
 *.egg-info/
 .streamlit/
+benchmarks/results/
 
 .idea/
 .vscode/
