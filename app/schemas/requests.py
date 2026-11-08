@@ -53,6 +53,10 @@ class ProviderDiagnostic(BaseModel):
     provider: str
     outcome: str
     category: Optional[str] = None
+    attempted: bool = False
+    selected: bool = False
+    fallback_used: bool = False
+    circuit_breaker_affected: bool = False
 
 
 class ChatCompletionResponse(BaseModel):

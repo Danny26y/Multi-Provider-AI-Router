@@ -64,3 +64,17 @@ def test_concurrent_half_open_allows_only_one_recovery_probe(monkeypatch):
         results = list(executor.map(lambda _: breaker.is_available("provider"), range(8)))
 
     assert results.count(True) == 1
+
+
+def test_older_inflight_failure_cannot_shorten_rate_limit_cooldown(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("app.core.circuit_breaker.time.monotonic", lambda: clock[0])
+    breaker = CircuitBreaker(recovery_time_seconds=10)
+    breaker.record_failure("limited", force_open=True, retry_after_seconds=60)
+    clock[0] = 101.0
+    breaker.record_failure("limited")
+    clock[0] = 111.0
+    assert not breaker.is_available("limited")
+    assert breaker.is_available("unrelated")
+    clock[0] = 160.0
+    assert breaker.is_available("limited")

@@ -124,7 +124,7 @@ def test_explicit_model_routes_only_to_compatible_provider(monkeypatch):
             "id": "provider-response",
             "created": 1,
             "model": config["default_model"],
-            "choices": [{"message": {"role": "assistant", "content": "Hi"}}],
+            "choices": [{"message": {"role": "assistant", "content": "Hi"}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
         }, "success", True, None
 
@@ -157,7 +157,7 @@ def test_actual_usage_and_configured_price_are_reported(monkeypatch):
             "id": "provider-response",
             "created": 1,
             "model": "test-model",
-            "choices": [{"message": {"role": "assistant", "content": "Hi"}}],
+            "choices": [{"message": {"role": "assistant", "content": "Hi"}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
         },
         {"default_model": "test-model"},

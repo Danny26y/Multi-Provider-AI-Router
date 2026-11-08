@@ -14,6 +14,7 @@ from app.core.logging import configure_logging, log_event, request_id_context
 from app.core.metrics import HTTP_LATENCY, HTTP_REQUESTS, render_metrics
 from app.schemas.requests import MAX_REQUEST_BODY_BYTES, ChatCompletionRequest, ChatCompletionResponse
 from app.services.provider_client import MultiProviderClient
+from app.services.routing_errors import RoutingError
 from config.settings import settings
 
 
@@ -180,6 +181,12 @@ async def chat_completions(
         )
     try:
         return await provider_client.execute_chat_completion(request)
+    except RoutingError as error:
+        log_event(logger, logging.ERROR, "chat_completion_failed", category=error.code)
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"detail": "No AI provider is currently available.", "error": error.public_error()},
+        )
     except Exception:
         log_event(logger, logging.ERROR, "chat_completion_failed")
         raise HTTPException(

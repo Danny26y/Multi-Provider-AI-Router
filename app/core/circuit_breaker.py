@@ -52,6 +52,10 @@ class CircuitBreaker:
     def record_success(self, provider_name: str) -> None:
         with self._lock:
             state = self._get_provider_state(provider_name)
+            # An older concurrent request cannot clear a circuit opened since it started.
+            # Recovery must first be admitted by is_available as a half-open probe.
+            if state["status"] == ProviderStatus.UNHEALTHY:
+                return
             state["failures"] = 0
             state["status"] = ProviderStatus.HEALTHY
             state["probe_in_flight"] = False
@@ -67,7 +71,7 @@ class CircuitBreaker:
             state = self._get_provider_state(provider_name)
             state["last_failure"] = time.monotonic()
             cooldown = max(self.recovery_time_seconds, retry_after_seconds or 0.0)
-            state["cooldown_until"] = state["last_failure"] + cooldown
+            state["cooldown_until"] = max(state["cooldown_until"], state["last_failure"] + cooldown)
             state["probe_in_flight"] = False
 
             if state["status"] == ProviderStatus.DEGRADED or force_open:
@@ -80,6 +84,16 @@ class CircuitBreaker:
             if state["failures"] >= self.failure_threshold:
                 state["status"] = ProviderStatus.UNHEALTHY
             record_circuit_state(provider_name, state["status"].value)
+
+    def record_neutral(self, provider_name: str) -> None:
+        """Release an inconclusive recovery probe without adding a health failure."""
+        with self._lock:
+            state = self._get_provider_state(provider_name)
+            if state["status"] == ProviderStatus.DEGRADED:
+                state["probe_in_flight"] = False
+                state["status"] = ProviderStatus.UNHEALTHY
+                state["cooldown_until"] = time.monotonic() + self.recovery_time_seconds
+                record_circuit_state(provider_name, state["status"].value)
 
     def snapshot(self) -> Dict[str, dict]:
         with self._lock:

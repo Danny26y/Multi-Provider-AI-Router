@@ -32,7 +32,7 @@ def request(**kwargs):
 def completion(model=None, content="Hello", **message_fields):
     return {
         "model": model or settings.NVIDIA_DEFAULT_MODEL,
-        "choices": [{"message": {"role": "assistant", "content": content, **message_fields}}],
+        "choices": [{"message": {"role": "assistant", "content": content, **message_fields}, "finish_reason": "stop"}],
         "usage": {"prompt_tokens": 10, "completion_tokens": 100, "total_tokens": 110},
     }
 
@@ -155,7 +155,7 @@ def test_reasoning_without_visible_answer_fails_over(client, content):
     client.mock_fallback_enabled = True
     response = run(client, lambda _: httpx.Response(200, json=completion(content=content, reasoning_content="private")))
     assert response.provider_used == "mock_fallback"
-    assert response.routing_diagnostics[0].category == "invalid_response"
+    assert response.routing_diagnostics[0].category == "unusable_output"
 
 
 def test_total_deadline_cancels_inflight_nvidia_request(client, monkeypatch):

@@ -64,3 +64,34 @@ Normal tests use mocked HTTP transport and do not require NVIDIA credentials.
 ## Resource limits
 
 Set CPU, memory, replica, request-concurrency, and upstream-connection limits in the deployment platform. The values depend on measured workload and provider latency; this repository does not claim universal defaults.
+
+## Failure classification and circuit health
+
+The router continues to the next eligible provider after a classified failure;
+it does not retry the same provider within a request or extend the total deadline.
+Provider/model eligibility and explicit-model constraints always apply.
+
+| Category | Circuit-breaker effect |
+| --- | --- |
+| `connection_error`, `timeout`, `server_error` (HTTP 5xx) | Increment availability/reliability failure count |
+| `rate_limited` (HTTP 429) | Open immediately; honor capped Retry-After cooldown |
+| `invalid_response` (malformed JSON/structure, invalid usage) | Increment reliability failure count |
+| `unusable_output` (empty/reasoning-only/unsupported non-text result) | No health failure |
+| `model_mismatch` | No health failure; check model/alias configuration |
+| `auth_error` (HTTP 401/403), `provider_configuration_error` | No health failure |
+| `unsupported_model` (HTTP 404), `invalid_request` (other client errors) | No health failure |
+| `missing_credentials`, `model_not_supported`, `fallback_disabled`, `deadline_exceeded` skips | No health failure |
+| `circuit_open` | Skip without attempting HTTP |
+
+HTTP 408 is classified as a timeout. HTTP 404 can also indicate an incorrect
+endpoint; inspect provider configuration when it appears as `unsupported_model`.
+The router does not parse raw error bodies to infer more specific client errors.
+
+Non-health failures preserve existing failure counts. If encountered during a
+half-open recovery probe, they release the probe and retain the prior unhealthy
+state for another recovery interval without adding a failure. Caller cancellation
+also releases a probe. A validated completion within the deadline resets health.
+Repeated unusable outputs can therefore continue to trigger failover without
+opening the provider circuit; use the diagnostic category to investigate model
+budgets or suitability. A `length` completion with visible text is accepted and
+can be truncated; this checkpoint does not evaluate factual answer quality.

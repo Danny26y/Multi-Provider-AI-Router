@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     NVIDIA_DEFAULT_MAX_TOKENS: int = Field(default=4096, gt=0)
     NVIDIA_MAX_OUTPUT_TOKENS: int = Field(default=16384, gt=0)
     MAX_OUTPUT_TOKENS: int = Field(default=16384, gt=0)
+    PROVIDER_MODEL_ALIASES: dict[str, dict[str, list[str]]] = {}
 
     GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
     CEREBRAS_BASE_URL: str = "https://api.cerebras.ai/v1"
