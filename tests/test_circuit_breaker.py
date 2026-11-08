@@ -1,5 +1,6 @@
-from app.core.circuit_breaker import CircuitBreaker, ProviderStatus
 from concurrent.futures import ThreadPoolExecutor
+
+from app.core.circuit_breaker import CircuitBreaker, ProviderStatus
 
 
 def test_opens_after_failure_threshold_and_allows_one_recovery_probe(monkeypatch):

@@ -94,6 +94,12 @@ docker stop multi-provider-ai-router
 
 The image binds Uvicorn to `0.0.0.0:8000` and runs as unprivileged `appuser`; `-p 8000:8000` maps the container port to the host.
 
+Docker also checks `GET /health/live` every 30 seconds after startup. Inspect the resulting health status with:
+
+```powershell
+docker inspect --format '{{.State.Health.Status}}' multi-provider-ai-router
+```
+
 ## Reliability controls
 
 The application owns one `httpx.AsyncClient` for its lifespan instead of opening a new connection pool per upstream request. It applies configurable connect, read, write, and pool timeouts plus one deadline across the complete provider-routing pass.
@@ -116,9 +122,10 @@ Prometheus-compatible metrics are exposed at `GET /metrics`:
 
 ## Tests and CI
 
-Run deterministic checks without provider credentials or paid API calls:
+Install the development dependencies, then run deterministic checks without provider credentials or paid API calls:
 
 ```powershell
+python -m pip install -r requirements-dev.txt
 python -m compileall app config main.py
 python -c "import main"
 python -m pytest -v
@@ -128,7 +135,21 @@ python -m pytest -v
 
 GitHub Actions CI runs the compile, import, and pytest checks on Ubuntu with Python 3.12 for pushes and pull requests to `main`.
 
+Install developer-only tooling with `python -m pip install -r requirements-dev.txt`. CI then runs Ruff linting and formatting checks, mypy, `pip-audit`, and coverage reporting in addition to the deterministic tests.
+
+`requirements.txt` contains the runtime dependencies used by the container. `requirements-dev.txt` adds tests and CI tooling; `requirements-dashboard.txt` adds the optional Streamlit dashboard; and `requirements-benchmark.txt` adds Locust.
+
 For repeatable load testing against a local mock upstream, follow [benchmarks/README.md](benchmarks/README.md). The harness produces Locust CSV data for throughput, p50, p95, and error rate; no benchmark figures are claimed until a run is recorded.
+
+## Production-oriented documentation
+
+- [Architecture](docs/architecture.md)
+- [Threat model](docs/threat-model.md)
+- [API examples](docs/api.md)
+- [Operational runbook](docs/operations.md)
+- [Benchmark results](docs/benchmark-results.md)
+
+Deploy behind an HTTPS-capable reverse proxy or load balancer, inject secrets through the deployment platform, and set explicit CPU, memory, replica, and concurrency limits there. This repository intentionally does not claim a staging or production deployment; the runbook defines the required staging smoke-test and rollback process.
 
 ## Limitations
 
