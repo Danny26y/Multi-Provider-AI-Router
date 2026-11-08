@@ -31,7 +31,7 @@ class ChatCompletionRequest(BaseModel):
     model: Optional[Annotated[str, Field(min_length=1, max_length=128)]] = None
     messages: Annotated[list[ChatMessage], Field(min_length=1, max_length=100)]
     temperature: Annotated[float, Field(ge=0.0, le=2.0)] = 0.7
-    max_tokens: Annotated[int, Field(ge=1, le=4096)] = 1024
+    max_tokens: Annotated[int, Field(ge=1, le=settings.MAX_OUTPUT_TOKENS)] = 1024
     stream: bool = False
 
     @model_validator(mode="after")

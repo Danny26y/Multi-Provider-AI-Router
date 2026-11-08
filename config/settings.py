@@ -16,13 +16,22 @@ class Settings(BaseSettings):
     ROUTER_API_KEY: Optional[str] = None
     GROQ_API_KEY: Optional[str] = None
     CEREBRAS_API_KEY: Optional[str] = None
+    NVIDIA_API_KEY: Optional[str] = None
+    NVIDIA_ENABLED: bool = True
+    CEREBRAS_ENABLED: bool = False
+    NVIDIA_BASE_URL: str = "https://integrate.api.nvidia.com/v1"
+    NVIDIA_DEFAULT_MODEL: str = "nvidia/nemotron-3.5-lightning-30b-a3b"
+    NVIDIA_ALLOWED_MODELS: list[str] = ["nvidia/nemotron-3.5-lightning-30b-a3b"]
+    NVIDIA_DEFAULT_MAX_TOKENS: int = Field(default=4096, gt=0)
+    NVIDIA_MAX_OUTPUT_TOKENS: int = Field(default=16384, gt=0)
+    MAX_OUTPUT_TOKENS: int = Field(default=16384, gt=0)
 
     GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
     CEREBRAS_BASE_URL: str = "https://api.cerebras.ai/v1"
     GROQ_FAST_MODEL: str = "llama-3.1-8b-instant"
     CEREBRAS_PRIMARY_MODEL: str = "zai-glm-4.7"
     GROQ_REASONING_MODEL: str = "llama-3.3-70b-versatile"
-    PROVIDER_ORDER: list[str] = ["groq_fast", "cerebras_primary", "groq_reasoning", "mock_fallback"]
+    PROVIDER_ORDER: list[str] = ["groq_fast", "nvidia", "groq_reasoning", "cerebras_primary", "mock_fallback"]
 
     REQUEST_CONNECT_TIMEOUT_SECONDS: float = Field(default=3.0, gt=0)
     REQUEST_READ_TIMEOUT_SECONDS: float = Field(default=10.0, gt=0)
@@ -43,6 +52,7 @@ class Settings(BaseSettings):
     @property
     def supported_models(self) -> set[str]:
         return {
+            *self.NVIDIA_ALLOWED_MODELS,
             self.GROQ_FAST_MODEL,
             self.CEREBRAS_PRIMARY_MODEL,
             self.GROQ_REASONING_MODEL,

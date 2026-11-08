@@ -8,7 +8,7 @@ The project demonstrates secure request handling, provider routing, deterministi
 
 ## Routing and circuit breakers
 
-Providers are evaluated in this order: `groq_fast`, `cerebras_primary`, `groq_reasoning`, then the optional `mock_fallback`.
+Providers are evaluated in this order: `groq_fast`, `nvidia`, `groq_reasoning`, then the optional `mock_fallback`. Cerebras remains supported and is disabled by default; enable `CEREBRAS_ENABLED` and include `cerebras_primary` in `PROVIDER_ORDER` to use it.
 
 - Providers without credentials, with open circuits, or incompatible with an explicitly requested model are skipped.
 - A request is sent at most once to an eligible provider; there is no retry loop.
@@ -62,7 +62,7 @@ curl -X POST "http://localhost:8000/v1/chat/completions" \
   -d '{"messages":[{"role":"user","content":"Explain the circuit breaker pattern."}]}'
 ```
 
-Supported message roles are `system`, `user`, and `assistant`. Requests require at least one nonempty message, constrain message and total content size, accept temperatures from `0` to `2`, and accept `max_tokens` from `1` to `4096`. Extra fields are rejected. Explicit model values must match a configured provider model; the defaults are `llama-3.1-8b-instant`, `zai-glm-4.7`, and `llama-3.3-70b-versatile`. Omit `model` to preserve provider-order failover. Streaming is not supported.
+Supported message roles are `system`, `user`, and `assistant`. Requests require at least one nonempty message, constrain message and total content size, accept temperatures from `0` to `2`, and accept `max_tokens` from `1` to `MAX_OUTPUT_TOKENS` (default `16384`). Extra fields are rejected. Explicit model values must match a configured provider model or `NVIDIA_ALLOWED_MODELS`; the NVIDIA default is `nvidia/nemotron-3.5-lightning-30b-a3b`. Explicit models never fall back to a different model or the mock provider. Omit `model` to preserve provider-order failover. Streaming is not supported.
 
 When development fallback is enabled and no remote provider is eligible, the response contains `provider_used: "mock_fallback"`, `fallback_used: true`, and non-sensitive `routing_diagnostics`. Real-provider responses set `fallback_used` to `false`. Provider response bodies, API keys, and request content are not included in diagnostics or client-facing errors.
 
@@ -153,7 +153,7 @@ Deploy behind an HTTPS-capable reverse proxy or load balancer, inject secrets th
 
 ## Limitations
 
-- Live Groq and Cerebras connectivity is not verified by this repository.
+- Live Groq, NVIDIA, and Cerebras connectivity is not verified by this repository.
 - Throughput, latency, and availability are not benchmarked.
 - The service has no TLS termination, persistent state, or streaming support.
 - Rate limiting and circuit-breaker state are not shared between workers or replicas.

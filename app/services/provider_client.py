@@ -28,6 +28,15 @@ class MultiProviderClient:
                 "api_key": settings.GROQ_API_KEY,
                 "default_model": settings.GROQ_FAST_MODEL,
             },
+            "nvidia": {
+                "base_url": settings.NVIDIA_BASE_URL,
+                "api_key": settings.NVIDIA_API_KEY,
+                "default_model": settings.NVIDIA_DEFAULT_MODEL,
+                "allowed_models": settings.NVIDIA_ALLOWED_MODELS,
+                "default_max_tokens": settings.NVIDIA_DEFAULT_MAX_TOKENS,
+                "max_output_tokens": settings.NVIDIA_MAX_OUTPUT_TOKENS,
+                "normalize_reasoning": True,
+            },
             "cerebras_primary": {
                 "base_url": settings.CEREBRAS_BASE_URL,
                 "api_key": settings.CEREBRAS_API_KEY,
@@ -44,6 +53,8 @@ class MultiProviderClient:
             provider_name: provider_configs[provider_name]
             for provider_name in settings.PROVIDER_ORDER
             if provider_name in provider_configs
+            and (provider_name != "nvidia" or settings.NVIDIA_ENABLED)
+            and (provider_name != "cerebras_primary" or settings.CEREBRAS_ENABLED)
         }
 
     async def start(self) -> None:
@@ -68,18 +79,19 @@ class MultiProviderClient:
         deadline = time.monotonic() + settings.TOTAL_REQUEST_TIMEOUT_SECONDS
 
         for provider_name, config in self.provider_configs.items():
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                diagnostics.append({"provider": provider_name, "outcome": "skipped", "category": "deadline_exceeded"})
+                break
             if config.get("is_mock"):
-                if not self.mock_fallback_enabled:
+                if not self.mock_fallback_enabled or request.model:
                     diagnostics.append({"provider": provider_name, "outcome": "skipped", "category": "fallback_disabled"})
                     continue
                 diagnostics.append({"provider": provider_name, "outcome": "success", "category": "mock_fallback"})
                 return self._generate_mock_response(provider_name, diagnostics)
 
-            remaining_seconds = deadline - time.monotonic()
-            if remaining_seconds <= 0:
-                diagnostics.append({"provider": provider_name, "outcome": "skipped", "category": "deadline_exceeded"})
-                break
-            if request.model and request.model != config["default_model"]:
+            selected_model = request.model or config["default_model"]
+            if selected_model not in config.get("allowed_models", [config["default_model"]]):
                 diagnostics.append({"provider": provider_name, "outcome": "skipped", "category": "model_not_supported"})
                 continue
             if not circuit_breaker.is_available(provider_name):
@@ -170,7 +182,19 @@ class MultiProviderClient:
             completion_tokens = max(1, len(output_text) // 4)
             total_tokens = prompt_tokens + completion_tokens
 
-        model = response_data.get("model", config["default_model"])
+        if config.get("normalize_reasoning"):
+            # Internal reasoning fields are not part of the public assistant message.
+            choices = [
+                {
+                    **choice,
+                    "message": {
+                        "role": choice.get("message", {}).get("role"),
+                        "content": choice.get("message", {}).get("content"),
+                    },
+                }
+                for choice in choices
+            ]
+        model = response_data.get("model", request.model or config["default_model"])
         price_per_million = settings.MODEL_PRICES_USD_PER_MILLION_TOKENS.get(model, 0.0)
         return ChatCompletionResponse(
             id=response_data.get("id", f"chatcmpl-{int(time.time())}"),
@@ -200,13 +224,17 @@ class MultiProviderClient:
         if self.http_client is None:
             raise RuntimeError("Provider HTTP client has not been started.")
 
-        url = f"{config['base_url']}/chat/completions"
+        url = f"{config['base_url'].rstrip('/')}/chat/completions"
         headers = {"Authorization": f"Bearer {config['api_key']}", "Content-Type": "application/json"}
+        output_tokens = request.max_tokens
+        if "max_tokens" not in request.model_fields_set:
+            output_tokens = config.get("default_max_tokens", output_tokens)
+        output_tokens = min(output_tokens, config.get("max_output_tokens", settings.MAX_OUTPUT_TOKENS))
         payload = {
             "model": request.model or config["default_model"],
             "messages": [message.model_dump() for message in request.messages],
             "temperature": request.temperature,
-            "max_tokens": request.max_tokens,
+            "max_tokens": output_tokens,
         }
         timeout = httpx.Timeout(
             connect=min(settings.REQUEST_CONNECT_TIMEOUT_SECONDS, remaining_seconds),
