@@ -139,6 +139,52 @@ Install developer-only tooling with `python -m pip install -r requirements-dev.t
 
 `requirements.txt` contains the runtime dependencies used by the container. `requirements-dev.txt` adds tests and CI tooling; `requirements-dashboard.txt` adds the optional Streamlit dashboard; and `requirements-benchmark.txt` adds Locust.
 
+## Engineering dashboard
+
+The optional Streamlit dashboard sends inference requests only through the secured
+router. Configure `DASHBOARD_ROUTER_URL` and `DASHBOARD_API_KEY` on the dashboard
+server, using environment variables or Streamlit secrets. If `DASHBOARD_API_KEY`
+is omitted, it uses the server-side `ROUTER_API_KEY`. Environment variables take
+precedence over secrets. The URL has no application default; `.env.example`
+contains a loopback example for local demonstrations.
+
+```powershell
+python -m pip install -r requirements-dashboard.txt
+python -m streamlit run dashboard.py
+```
+
+Use HTTPS for remote routers; HTTP is allowed only on loopback. The dashboard
+does not display keys or full connection URLs and does not follow redirects.
+`DASHBOARD_REQUEST_TIMEOUT_SECONDS` defaults to 30 (maximum 120); public health
+and metrics probes use at most five seconds per HTTP phase. No request is retried
+automatically. Keep the dashboard timeout longer than the router's total deadline
+plus network overhead.
+
+The prompt panel supports an optional explicit model, temperature, and an opt-in
+token-budget override. Leaving model and token override unset preserves router
+defaults and normal fallback. Truncated answers are visibly marked. Session
+history retains at most 100 observations without prompts or answer text; only the
+latest answer is retained separately in the server-side browser session.
+
+Health checks report only supported status fields. They do not infer circuits
+from `/health`. Server metrics are a separate, manually refreshed Prometheus
+snapshot; charts describe observations in the current dashboard session. Missing
+provider, usage, latency, or diagnostic values remain unreported.
+
+Dashboard client tests run with the normal development dependencies. Install the
+dashboard requirements to also run the optional Streamlit UI tests:
+
+```powershell
+python -m pytest tests/test_dashboard_client.py tests/test_dashboard_ui.py -v
+```
+
+Protect access to the dashboard with your deployment's authentication controls:
+anyone able to use it can send requests using its server-held router credential.
+Do not put secrets in URLs, prompts, committed files, or Streamlit widget defaults.
+The existing public `/metrics` endpoint remains unchanged; restrict its network
+exposure through your existing ingress controls. This checkpoint adds no public
+status endpoints or new infrastructure.
+
 For repeatable load testing against a local mock upstream, follow [benchmarks/README.md](benchmarks/README.md). The harness produces Locust CSV data for throughput, p50, p95, and error rate; no benchmark figures are claimed until a run is recorded.
 
 ## Production-oriented documentation

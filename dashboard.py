@@ -1,144 +1,170 @@
+"""Streamlit engineering dashboard. Credentials and HTTP requests stay server-side."""
 
-import time
-import requests
+import os
+from datetime import datetime, timezone
+
 import streamlit as st
-import plotly.express as px
-import pandas as pd
+from dotenv import load_dotenv
 
-# Router API Endpoints
-PROXY_URL = "http://localhost:8000/v1/chat/completions"
-HEALTH_URL = "http://localhost:8000/health"
-
-st.set_page_config(
-    page_title="AI Proxy Gateway Control Center",
-    page_icon="⚡",
-    layout="wide"
-)
-
-st.title("Enterprise AI Multi-Provider Proxy Gateway")
-st.caption("Real-Time Circuit Breaker Status, Latency Telemetry, and Failover Management")
-
-# Initialize session state for latency & cost history
-if "history" not in st.session_state:
-    st.session_state.history = []
-
-# --- Sidebar: Operational Controls ---
-st.sidebar.header("Gateway Controls")
+from app.services.dashboard_client import DashboardClient, DashboardConfig, DashboardConfigurationError, session_summary
 
 
-def fetch_health():
-    try:
-        res = requests.get(HEALTH_URL, timeout=2.0)
-        if res.status_code == 200:
-            return res.json().get("circuit_breaker_states", {})
-    except Exception:
-        st.sidebar.error("Proxy Server Offline! Run 'python main.py'")
-    return {}
+def reported(value, suffix=""):
+    return "Not reported" if value is None else f"{value}{suffix}"
 
 
-states = fetch_health()
-
-if st.sidebar.button("Refresh Provider Status"):
-    st.rerun()
-
-# --- Section 1: Provider Health Badges ---
-st.subheader("Live Provider Circuit Breaker Health")
-if states:
-    cols = st.columns(len(states))
-    for idx, (provider, data) in enumerate(states.items()):
-        status = data.get("status", "unknown").upper()
-        failures = data.get("failures", 0)
-
-        with cols[idx]:
-            if status == "HEALTHY":
-                st.success(f"**{provider}**\n\nSTATUS: {status}\nFailures: {failures}")
-            elif status == "DEGRADED":
-                st.warning(f"**{provider}**\n\nSTATUS: {status}\nFailures: {failures}")
-            else:
-                st.error(f"**{provider}**\n\nSTATUS: {status}\nFailures: {failures}")
-else:
-    st.info("Start `main.py` to view active provider health status.")
-
-st.divider()
-
-# --- Section 2: Interactive Prompt Execution & Real-Time Test ---
-col_left, col_right = st.columns([1, 1])
-
-with col_left:
-    st.subheader("Live Prompt Test")
-    test_prompt = st.text_area(
-        "Input Test Prompt:",
-        value="Explain the importance of multi-cloud AI infrastructure in 2 concise sentences.",
-        height=100
-    )
-
-    if st.button("Send Payload Through Proxy"):
-        payload = {"messages": [{"role": "user", "content": test_prompt}]}
-
-        t0 = time.time()
-        try:
-            res = requests.post(PROXY_URL, json=payload, timeout=15)
-            t1 = time.time()
-            latency = round(t1 - t0, 3)
-
-            # Inside dashboard.py -> if st.button("🚀 Send Payload Through Proxy"):
-
-            if res.status_code == 200:
-                data = res.json()
-                provider = data.get("provider_used", "unknown")
-                response_text = data["choices"][0]["message"]["content"]
-
-                # 1. Extract the usage dictionary returned by FastAPI
-                usage = data.get("usage") or {}
-                tokens = usage.get("total_tokens", 0)
-                cost = usage.get("estimated_cost_usd", 0.0)
-
-                # 2. Extract latency returned by the API (or fallback to wall-clock time)
-                latency = data.get("latency_seconds", round(t1 - t0, 3))
-
-                # 3. Append to Streamlit session history
-                st.session_state.history.append({
-                    "Timestamp": time.strftime("%H:%M:%S"),
-                    "Provider": provider,
-                    "Latency (s)": latency,
-                    "Total Tokens": tokens,
-                    "Est. Cost ($)": f"{cost:.6f}"  # Format nicely for UI display
-                })
-
-                st.success(
-                    f"**Fulfilled By:** `{provider}` in **{latency}s** | **Tokens:** `{tokens}` | **Cost:** `${cost:.6f}`")
-                st.text_area("Response Output:", value=response_text, height=120)
-            else:
-                st.error(f"Error {res.status_code}: {res.text}")
-        except Exception as e:
-            st.error(f"Request failed: {e}")
-
-with col_right:
-    st.subheader(" Live Telemetry Logs")
-    if st.session_state.history:
-        df = pd.DataFrame(st.session_state.history)
-        st.dataframe(df, use_container_width=True)
-
-        # Summary metrics
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Total Requests", len(df))
-        m2.metric("Avg Latency", f"{df['Latency (s)'].mean():.2f}s")
-        m3.metric("Total Tokens", df["Total Tokens"].sum())
+def show_result(result):
+    if result["outcome"] == "failed":
+        st.error(result["message"])
+        if result.get("error_code"):
+            st.caption(f"Routing outcome: {result['error_code']}")
     else:
-        st.info("No requests executed in this session yet.")
+        if result["outcome"] == "truncated":
+            st.warning("Truncated response — the output token limit was reached. The answer may be incomplete.")
+        elif result.get("provider") == "mock_fallback":
+            st.warning("Local mock fallback selected — this is not generated model output.")
+        else:
+            st.success("Completion received")
+        st.text_area("Assistant response", value=result["content"], height=210, disabled=True)
+        provider, model = st.columns(2)
+        provider.metric("Selected provider", reported(result.get("provider")))
+        model.metric("Returned model", reported(result.get("model")))
+        st.caption(f"Finish reason: {reported(result.get('finish_reason'))}")
+        timing, routing = st.columns(2)
+        timing.write(f"Dashboard round trip: {reported(result.get('round_trip_seconds'), ' s')}")
+        timing.write(f"Selected-provider latency: {reported(result.get('provider_latency_seconds'), ' s')}")
+        fallback = result.get("fallback_used")
+        routing.write(f"Fallback used: {'Not reported' if fallback is None else 'Yes' if fallback else 'No'}")
+        usage = result.get("usage", {})
+        estimated = usage.get("token_usage_is_estimated")
+        st.caption("Token usage: " + ("estimated" if estimated is True else "reported by upstream" if estimated is False else "estimation status not reported"))
+        st.dataframe([{key: usage.get(key) for key in ("prompt_tokens", "completion_tokens", "total_tokens")}])
+        if usage.get("estimated_cost_usd") is not None:
+            st.caption(f"Router-reported cost: ${usage['estimated_cost_usd']:.6f} USD; estimation flag: {reported(usage.get('cost_is_estimated'))}")
+    with st.expander("Response-level routing diagnostics", expanded=result["outcome"] == "failed"):
+        if result.get("diagnostics"):
+            st.dataframe(result["diagnostics"])
+        else:
+            st.info("No routing diagnostics were reported for this request.")
 
-st.divider()
 
-# --- Section 3: Latency Visualization Chart ---
-if len(st.session_state.history) > 1:
-    st.subheader(" Provider Response Latency Analytics")
-    df_chart = pd.DataFrame(st.session_state.history)
-    fig = px.bar(
-        df_chart,
-        x="Timestamp",
-        y="Latency (s)",
-        color="Provider",
-        title="Round-Trip Request Latency per Provider Execution",
-        text="Latency (s)"
-    )
-    st.plotly_chart(fig, use_container_width=True)
+def main():
+    load_dotenv()
+    st.set_page_config(page_title="AI Router | Operations", page_icon="↗", layout="wide")
+    st.title("AI Router")
+    st.caption("Prompt testing and operational visibility · all inference goes through the router")
+    try:
+        try:
+            secrets = dict(st.secrets)
+        except FileNotFoundError:
+            secrets = {}
+        config = DashboardConfig.from_sources(os.environ, secrets)
+    except DashboardConfigurationError as error:
+        st.error(str(error))
+        st.info("Configure DASHBOARD_ROUTER_URL and DASHBOARD_API_KEY on the dashboard server, then reload.")
+        return
+    client = DashboardClient(config)
+    st.session_state.setdefault("history", [])
+    st.sidebar.header("Router connection")
+    st.sidebar.caption("Target configured on the server. Keys and full connection URLs are never displayed.")
+    if not config.api_key:
+        st.sidebar.warning("Prompt authentication is not configured.")
+    if st.sidebar.button("Check connection", key="check_connection"):
+        with st.spinner("Checking router health…"):
+            st.session_state["health"] = client.health()
+            st.session_state["health_checked"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    health = st.session_state.get("health")
+    if health:
+        live = health["/health/live"]
+        ready = health["/health/ready"]
+        if live.get("status") == "online" and ready.get("status") == "ready":
+            st.sidebar.success("Router online · ready")
+        elif live.get("status") == "online":
+            st.sidebar.warning("Router online · readiness not confirmed")
+        else:
+            st.sidebar.warning("Connection not confirmed")
+        for path, result in health.items():
+            st.sidebar.write(f"{path}: {result.get('status', 'unavailable')}")
+            if result.get("message"):
+                st.sidebar.caption(result["message"])
+        st.sidebar.caption(f"Last checked (UTC): {st.session_state['health_checked']}")
+    else:
+        st.sidebar.info("Connection not checked")
+    st.sidebar.caption("Readiness reports configuration, not a live inference test. Health endpoints do not expose provider circuits.")
+    prompt_tab, history_tab, metrics_tab = st.tabs(["Prompt test", "Session observations", "Server metrics"])
+    with prompt_tab:
+        st.subheader("Test a routed completion")
+        with st.form("prompt_test"):
+            prompt = st.text_area("Prompt", height=140, max_chars=20_000, key="prompt")
+            model = st.text_input("Explicit model (optional)", max_chars=128, help="Leave blank for normal provider fallback. Explicit models must be in the router allowlist.", key="model")
+            left, right = st.columns(2)
+            temperature = left.slider("Temperature", 0.0, 2.0, 0.7, 0.1)
+            override = right.checkbox("Override output token budget", value=False)
+            tokens = right.number_input("Max output tokens", min_value=1, value=1024, step=256, help="The router validates and may cap this budget. Reasoning consumes output tokens too.")
+            submitted = st.form_submit_button("Send through router", disabled=not bool(config.api_key))
+        if submitted:
+            with st.spinner("Waiting for the router…"):
+                result = client.prompt(prompt, model=model.strip(), temperature=temperature, max_tokens=int(tokens) if override else None)
+            result["observed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            st.session_state["last_result"] = result
+            st.session_state["history"] = [*st.session_state["history"], {
+                key: result.get(key) for key in (
+                    "observed_at", "outcome", "provider", "model", "finish_reason", "round_trip_seconds",
+                    "provider_latency_seconds", "fallback_used", "usage",
+                )
+            }][-100:]
+        if st.session_state.get("last_result"):
+            st.divider()
+            show_result(st.session_state["last_result"])
+        else:
+            st.info("Send a prompt to inspect the returned answer, provider, and routing decisions.")
+    with history_tab:
+        st.subheader("This dashboard session")
+        st.caption("Last 100 submissions in this browser session. These are observations, not global provider performance. History excludes prompts and answers.")
+        if st.button("Clear session history"):
+            st.session_state["history"] = []
+            st.session_state.pop("last_result", None)
+            st.rerun()
+        history = st.session_state["history"]
+        summary = session_summary(history)
+        if not history:
+            st.info("No requests observed in this session yet.")
+        else:
+            a, b, c, d = st.columns(4)
+            a.metric("Session submissions", summary["requests"])
+            b.metric("Completed", summary["completed"])
+            c.metric("Truncated", summary["truncated"])
+            d.metric("Failed", summary["failed"])
+            st.caption(f"Reported fallback selections: {summary['reported_fallbacks']} / {summary['fallback_flags_reported']} responses with a fallback flag. Mean observed round trip: {reported(round(summary['mean_round_trip_seconds'], 3) if summary['mean_round_trip_seconds'] is not None else None, ' s')}")
+            st.dataframe([{**{key: value for key, value in row.items() if key != "usage"}, **(row.get("usage") or {})} for row in history])
+            chart_left, chart_right = st.columns(2)
+            elapsed = {index + 1: row["round_trip_seconds"] for index, row in enumerate(history) if row.get("round_trip_seconds") is not None}
+            if elapsed:
+                chart_left.caption("Observed round trip (seconds) by session submission")
+                chart_left.line_chart({"Round trip (s)": elapsed})
+            if summary["provider_selections"]:
+                chart_right.caption("Reported provider selections in this session")
+                chart_right.bar_chart({"Selections": summary["provider_selections"]})
+    with metrics_tab:
+        st.subheader("Router Prometheus snapshot")
+        st.caption("Server-reported cumulative samples from /metrics, separate from session history. A snapshot is not a rate or a cross-replica aggregate. Only known router metric families are shown.")
+        if st.button("Fetch server metrics"):
+            with st.spinner("Fetching router metrics…"):
+                st.session_state["metrics"] = client.metrics()
+                st.session_state["metrics_checked"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        result = st.session_state.get("metrics")
+        if result:
+            st.caption(f"Snapshot (UTC): {st.session_state['metrics_checked']}")
+            if result["outcome"] == "failed":
+                st.error(result["message"])
+            elif result.get("metrics"):
+                st.dataframe(result["metrics"])
+                st.caption("Circuit gauge, when reported: 0 = healthy, 1 = degraded, 2 = unhealthy. Samples are not a live connectivity guarantee.")
+            else:
+                st.info("No supported router metric samples were reported.")
+        else:
+            st.info("Fetch a snapshot to view actual server metrics.")
+
+
+if __name__ == "__main__":
+    main()
