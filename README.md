@@ -114,9 +114,17 @@ Application logs are JSON records with a request correlation ID. Send `X-Request
 
 Prometheus-compatible metrics are exposed at `GET /metrics`:
 
+Set `METRICS_API_KEY` to require `X-Metrics-Key` on this endpoint; use a separate
+secret from the chat key. Health probes remain public and minimal. Configure the
+metrics key and private monitoring ingress before deployment. Leaving it unset
+preserves the earlier public-metrics contract.
+
 - `ai_router_http_requests_total` and `ai_router_http_request_duration_seconds`
 - `ai_router_provider_failures_total` and `ai_router_provider_request_duration_seconds`
 - `ai_router_circuit_state` (`healthy=0`, `degraded=1`, `unhealthy=2`)
+- Selected completions, fallback selections, token sources, circuit transitions,
+  in-flight/queued work, concurrency limits, and rejection counters (see the
+  [Checkpoint E runbook](docs/deployment-readiness.md) for names and denominators).
 
 `GET /health/live` reports whether the process is running. `GET /health/ready` returns 200 only when chat authentication is configured and at least one remote provider or enabled development fallback is available. `GET /health` remains a minimal compatibility status endpoint and does not expose circuit-breaker internals.
 
@@ -125,7 +133,9 @@ Prometheus-compatible metrics are exposed at `GET /metrics`:
 Install the development dependencies, then run deterministic checks without provider credentials or paid API calls:
 
 ```powershell
-python -m pip install -r requirements-dev.txt
+python -m pip install uv==0.13.4
+python scripts/lock_dependencies.py --platform windows
+python -m pip install --require-hashes -r .locks/ci.txt
 python -m compileall app config main.py
 python -c "import main"
 python -m pytest -v
@@ -135,7 +145,11 @@ python -m pytest -v
 
 GitHub Actions CI runs the compile, import, and pytest checks on Ubuntu with Python 3.12 for pushes and pull requests to `main`.
 
-Install developer-only tooling with `python -m pip install -r requirements-dev.txt`. CI then runs Ruff linting and formatting checks, mypy, `pip-audit`, and coverage reporting in addition to the deterministic tests.
+CI generates Linux-targeted hash locks and runs Ruff linting, the explicit mypy
+scope, strict dependency auditing, coverage tests including the optional dashboard,
+and Docker build/runtime checks. See [release preparation](docs/deployment-readiness.md)
+for supported scope, severity policy, dependency-update verification, and remaining
+infrastructure responsibilities. No CI job deploys or requires provider API keys.
 
 `requirements.txt` contains the runtime dependencies used by the container. `requirements-dev.txt` adds tests and CI tooling; `requirements-dashboard.txt` adds the optional Streamlit dashboard; and `requirements-benchmark.txt` adds Locust.
 
@@ -150,7 +164,7 @@ contains a loopback example for local demonstrations.
 
 ```powershell
 python -m pip install -r requirements-dashboard.txt
-python -m streamlit run dashboard.py
+python -m streamlit run dashboard.py --server.address 127.0.0.1
 ```
 
 Use HTTPS for remote routers; HTTP is allowed only on loopback. The dashboard

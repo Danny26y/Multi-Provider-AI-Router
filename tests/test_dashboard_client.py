@@ -13,7 +13,6 @@ from app.services.dashboard_client import (
     session_summary,
 )
 
-
 KEY = "test-dashboard-secret"
 
 

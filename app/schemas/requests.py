@@ -4,7 +4,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from config.settings import settings
 
-
 MessageRole = Literal["system", "user", "assistant"]
 MAX_MESSAGE_CONTENT_CHARS = 20_000
 MAX_REQUEST_CONTENT_CHARS = 100_000

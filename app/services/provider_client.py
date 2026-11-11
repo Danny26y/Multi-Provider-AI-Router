@@ -11,12 +11,18 @@ from pydantic import ValidationError
 
 from app.core.circuit_breaker import circuit_breaker
 from app.core.logging import log_event
-from app.core.metrics import PROVIDER_FAILURES, PROVIDER_LATENCY
+from app.core.metrics import (
+    COMPLETIONS,
+    PROVIDER_FAILURES,
+    PROVIDER_LATENCY,
+    ROUTING_LATENCY,
+    provider_label,
+    record_completion,
+)
 from app.schemas.requests import ChatCompletionRequest, ChatCompletionResponse
 from app.services.response_validation import UpstreamResponseError, validate_response
 from app.services.routing_errors import RoutingError, routing_diagnostics
 from config.settings import settings
-
 
 logger = logging.getLogger("router.provider")
 
@@ -66,7 +72,7 @@ class MultiProviderClient:
 
     async def start(self) -> None:
         if self.http_client is None:
-            self.http_client = httpx.AsyncClient()
+            self.http_client = httpx.AsyncClient(follow_redirects=False, trust_env=False)
 
     async def close(self) -> None:
         if self.http_client is not None:
@@ -75,13 +81,35 @@ class MultiProviderClient:
 
     def is_ready(self) -> bool:
         has_configured_remote_provider = any(
-            config.get("api_key")
+            config.get("api_key") and any(config.get("allowed_models", [config.get("default_model")]))
             for config in self.provider_configs.values()
             if not config.get("is_mock")
         )
-        return bool(settings.ROUTER_API_KEY) and (has_configured_remote_provider or self.mock_fallback_enabled)
+        has_configured_mock = self.mock_fallback_enabled and any(
+            config.get("is_mock") for config in self.provider_configs.values()
+        )
+        return bool(settings.ROUTER_API_KEY) and (has_configured_remote_provider or has_configured_mock)
 
     async def execute_chat_completion(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
+        started = time.monotonic()
+        outcome = "failed"
+        try:
+            response = await self._execute_chat_completion(request)
+            record_completion(response)
+            outcome = "success"
+            return response
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            COMPLETIONS.labels(provider="none", outcome=outcome).inc()
+            raise
+        except Exception as error:
+            outcome = "deadline_exceeded" if isinstance(error, RoutingError) and error.code == "deadline_exceeded" else "failed"
+            COMPLETIONS.labels(provider="none", outcome=outcome).inc()
+            raise
+        finally:
+            ROUTING_LATENCY.labels(outcome=outcome).observe(max(0, time.monotonic() - started))
+
+    async def _execute_chat_completion(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
         diagnostics = []
         deadline = time.monotonic() + settings.TOTAL_REQUEST_TIMEOUT_SECONDS
 
@@ -116,6 +144,7 @@ class MultiProviderClient:
                     break
                 result = await self._send_http_request(config, request, remaining_seconds)
                 latency = round(time.monotonic() - started_at, 3)
+                PROVIDER_LATENCY.labels(provider=provider_label(provider_name)).observe(max(0, latency))
 
                 if result[0]:
                     try:
@@ -137,7 +166,6 @@ class MultiProviderClient:
                         diagnostics.append({"provider": provider_name, "outcome": "failed", "category": "deadline_exceeded"})
                         break
                     circuit_breaker.record_success(provider_name)
-                    PROVIDER_LATENCY.labels(provider=provider_name).observe(latency)
                     log_event(logger, logging.INFO, "provider_request_succeeded", provider=provider_name, latency_seconds=latency)
                     return response
 
@@ -164,7 +192,7 @@ class MultiProviderClient:
 
     def _record_provider_failure(self, provider_name: str, category: str, retryable: bool) -> None:
         PROVIDER_FAILURES.labels(
-            provider=provider_name,
+            provider=provider_label(provider_name),
             category=category,
             retryable=str(retryable).lower(),
         ).inc()
@@ -241,7 +269,7 @@ class MultiProviderClient:
             return False, 500, "provider_configuration_error", False, None
 
         url = f"{config['base_url'].rstrip('/')}/chat/completions"
-        headers = {"Authorization": f"Bearer {config['api_key']}", "Content-Type": "application/json"}
+        headers = {"Authorization": f"Bearer {config['api_key']}", "Content-Type": "application/json", "Accept-Encoding": "identity"}
         output_tokens = request.max_tokens
         if "max_tokens" not in request.model_fields_set:
             output_tokens = config.get("default_max_tokens", output_tokens)
@@ -258,11 +286,29 @@ class MultiProviderClient:
             write=min(settings.REQUEST_WRITE_TIMEOUT_SECONDS, remaining_seconds),
             pool=min(settings.REQUEST_POOL_TIMEOUT_SECONDS, remaining_seconds),
         )
+
+        async def exchange() -> httpx.Response:
+            async with self.http_client.stream(
+                "POST", url, headers=headers, json=payload, timeout=timeout, follow_redirects=False,
+            ) as upstream:
+                if upstream.status_code != 200:
+                    # Classification needs status/Retry-After only; discard raw error bodies.
+                    return httpx.Response(upstream.status_code, headers={"Retry-After": upstream.headers.get("Retry-After", "")})
+                body = bytearray()
+                async for chunk in upstream.aiter_bytes(chunk_size=65536):
+                    if len(body) + len(chunk) > settings.MAX_UPSTREAM_RESPONSE_BYTES:
+                        raise UpstreamResponseError()
+                    body.extend(chunk)
+                # aiter_bytes has already decoded Content-Encoding; do not decode it twice.
+                return httpx.Response(200, content=bytes(body))
+
         try:
             response = await asyncio.wait_for(
-                self.http_client.post(url, headers=headers, json=payload, timeout=timeout),
+                exchange(),
                 timeout=remaining_seconds,
             )
+        except UpstreamResponseError:
+            return False, 502, "invalid_response", True, None
         except (httpx.InvalidURL, httpx.UnsupportedProtocol, ValueError):
             return False, 500, "provider_configuration_error", False, None
         except (asyncio.TimeoutError, httpx.TimeoutException):

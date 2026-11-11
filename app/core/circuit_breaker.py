@@ -3,7 +3,7 @@ import time
 from enum import Enum
 from typing import Dict
 
-from app.core.metrics import record_circuit_state
+from app.core.metrics import record_circuit_state, record_transition
 
 
 class ProviderStatus(str, Enum):
@@ -44,6 +44,7 @@ class CircuitBreaker:
                 record_circuit_state(provider_name, state["status"].value)
                 return False
 
+            record_transition(provider_name, state["status"].value, ProviderStatus.DEGRADED.value)
             state["status"] = ProviderStatus.DEGRADED
             state["probe_in_flight"] = True
             record_circuit_state(provider_name, state["status"].value)
@@ -57,6 +58,7 @@ class CircuitBreaker:
             if state["status"] == ProviderStatus.UNHEALTHY:
                 return
             state["failures"] = 0
+            record_transition(provider_name, state["status"].value, ProviderStatus.HEALTHY.value)
             state["status"] = ProviderStatus.HEALTHY
             state["probe_in_flight"] = False
             record_circuit_state(provider_name, state["status"].value)
@@ -76,12 +78,14 @@ class CircuitBreaker:
 
             if state["status"] == ProviderStatus.DEGRADED or force_open:
                 state["failures"] = self.failure_threshold
+                record_transition(provider_name, state["status"].value, ProviderStatus.UNHEALTHY.value)
                 state["status"] = ProviderStatus.UNHEALTHY
                 record_circuit_state(provider_name, state["status"].value)
                 return
 
             state["failures"] += 1
             if state["failures"] >= self.failure_threshold:
+                record_transition(provider_name, state["status"].value, ProviderStatus.UNHEALTHY.value)
                 state["status"] = ProviderStatus.UNHEALTHY
             record_circuit_state(provider_name, state["status"].value)
 
@@ -91,6 +95,7 @@ class CircuitBreaker:
             state = self._get_provider_state(provider_name)
             if state["status"] == ProviderStatus.DEGRADED:
                 state["probe_in_flight"] = False
+                record_transition(provider_name, state["status"].value, ProviderStatus.UNHEALTHY.value)
                 state["status"] = ProviderStatus.UNHEALTHY
                 state["cooldown_until"] = time.monotonic() + self.recovery_time_seconds
                 record_circuit_state(provider_name, state["status"].value)

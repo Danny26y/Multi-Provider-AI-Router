@@ -410,9 +410,9 @@ def test_terminal_errors_are_sanitized_and_deadline_is_shared(route, monkeypatch
 
 
 def test_late_valid_response_is_not_selected_after_deadline(route, monkeypatch):
-    client, _ = route
+    client, breaker = route
     clock = [0.0]
-    monkeypatch.setattr(provider_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(provider_module, "time", SimpleNamespace(monotonic=lambda: clock[0], time=lambda: 1.0))
     monkeypatch.setattr(settings, "TOTAL_REQUEST_TIMEOUT_SECONDS", 10.0)
 
     async def send(config, req, remaining):
@@ -424,6 +424,8 @@ def test_late_valid_response_is_not_selected_after_deadline(route, monkeypatch):
         asyncio.run(client.execute_chat_completion(ChatCompletionRequest(messages=[{"role": "user", "content": "Hello"}])))
     assert error.value.code == "deadline_exceeded"
     assert not any(item.selected for item in error.value.diagnostics)
+    assert error.value.diagnostics[0].category == "deadline_exceeded"
+    assert breaker.snapshot()["groq_fast"]["failures"] == 0
 
 
 def test_terminal_error_contains_no_raw_body_or_credentials(route, caplog):

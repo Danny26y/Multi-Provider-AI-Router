@@ -1,5 +1,6 @@
 """Optional UI tests: install requirements-dashboard.txt to execute these in CI."""
 
+from importlib import import_module
 from pathlib import Path
 
 import httpx
@@ -7,13 +8,24 @@ import pytest
 
 from app.services.dashboard_client import DashboardClient
 
-
 AppTest = pytest.importorskip("streamlit.testing.v1").AppTest
 KEY = "dummy-ui-router-secret"
 
 
+@pytest.fixture(scope="module")
+def rendering_dependencies():
+    """Initialize lazy rendering libraries outside the per-interaction timeout.
+
+    AppTest.run already waits for script completion. Cold dataframe/chart imports
+    belong to fixture setup, not the functional interaction's 15-second budget.
+    Missing/broken dependencies still fail setup; no sleeps or retries hide errors.
+    """
+    for module in ("pandas", "pyarrow", "altair"):
+        import_module(module)
+
+
 @pytest.fixture
-def dashboard(monkeypatch):
+def dashboard(monkeypatch, rendering_dependencies):
     monkeypatch.setenv("DASHBOARD_ROUTER_URL", "https://router.test")
     monkeypatch.setenv("DASHBOARD_API_KEY", KEY)
     monkeypatch.setattr("dotenv.load_dotenv", lambda: None)

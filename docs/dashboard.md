@@ -22,10 +22,13 @@ to another destination. The dashboard contains no direct provider integration.
 | `GET /health` | Compatibility status (`online`) | Public |
 | `GET /health/live` | Liveness (`online`) | Public |
 | `GET /health/ready` | Configuration readiness (`ready` or HTTP 503) | Public |
-| `GET /metrics` | Manual, filtered Prometheus snapshot | Public |
+| `GET /metrics` | Manual, filtered Prometheus snapshot | `X-Metrics-Key` when `METRICS_API_KEY` is configured; otherwise public |
 
-The key is sent only to the authenticated chat endpoint. The API contracts and
-access controls are unchanged. Health checks are snapshots, not inference tests
+The chat key is sent only to the authenticated chat endpoint. Checkpoint E adds
+an optional separate `DASHBOARD_METRICS_API_KEY` (fallback `METRICS_API_KEY`) sent
+only as `X-Metrics-Key` to `/metrics`; its value is also redacted from displays.
+The metrics guard is opt-in to preserve existing clients; configure it for deployment.
+Health checks are snapshots, not inference tests
 or continuous monitoring. Missing health fields are shown as unknown. Readiness
 does not prove that remote credentials or providers are currently working.
 
@@ -67,7 +70,7 @@ Streamlit session state so it survives reruns. The prompt widget also retains it
 current input. Clear history or end the session to discard displayed responses.
 The dashboard is not an authentication boundary: restrict access to its UI,
 because its users act with the server-held router credential. Public metrics
-access is a pre-existing contract and should be restricted at the network edge
+access without a configured metrics key is a pre-existing contract and should be restricted at the network edge
 where required. No new unauthenticated infrastructure details are exposed.
 
 The dashboard uses finite HTTP phase timeouts and no retries. These are not a

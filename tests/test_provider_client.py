@@ -2,6 +2,7 @@ import asyncio
 
 import httpx
 import pytest
+
 from app.core.circuit_breaker import ProviderStatus, circuit_breaker
 from app.schemas.requests import ChatCompletionRequest
 from app.services.provider_client import MultiProviderClient
