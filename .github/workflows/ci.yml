@@ -35,6 +35,9 @@ jobs:
       - name: Generate dated hash locks
         run: python scripts/lock_dependencies.py --platform linux --benchmark
 
+      - name: Verify committed Linux runtime lock and reproducibility
+        run: python scripts/lock_dependencies.py --platform linux --check-runtime-lock
+
       - name: Install locked development and dashboard dependencies
         run: python -m pip install --require-hashes -r .locks/ci.txt
 
@@ -43,7 +46,7 @@ jobs:
 
       - name: Check dependency vulnerabilities
         run: |
-          python -m pip_audit -r .locks/runtime.txt --no-deps --disable-pip --strict --format json --output audit-runtime.json
+          python -m pip_audit -r requirements-linux.lock --no-deps --disable-pip --strict --format json --output audit-runtime.json
           python -m pip_audit -r .locks/ci.txt --no-deps --disable-pip --strict --format json --output audit-ci.json
           python -m pip_audit -r .locks/benchmark.txt --no-deps --disable-pip --strict --format json --output audit-benchmark.json
 
@@ -64,7 +67,10 @@ jobs:
 
       - name: Verify API image build
         run: |
-          docker build --pull --tag ai-router:ci .
+          git clone --no-hardlinks --no-checkout . "$RUNNER_TEMP/router-context"
+          git -C "$RUNNER_TEMP/router-context" checkout --detach "$GITHUB_SHA"
+          test ! -e "$RUNNER_TEMP/router-context/.locks"
+          docker build --pull --tag ai-router:ci "$RUNNER_TEMP/router-context"
           docker image inspect ai-router:ci > image-metadata.json
           docker buildx imagetools inspect "$(awk '/^FROM / {print $2; exit}' Dockerfile)" > base-image-manifest.txt
 
@@ -96,6 +102,7 @@ jobs:
         with:
           name: dependency-and-security-evidence
           path: |
+            requirements-linux.lock
             .locks/*.txt
             audit-*.json
             image-metadata.json

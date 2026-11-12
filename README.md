@@ -148,10 +148,10 @@ Prometheus snapshots**. Missing values stay missing. See [dashboard guide](docs/
 
 ## Docker startup
 
-Generate **Linux** locks first, even when Docker is invoked from Windows:
+Docker uses the committed **Linux/Python 3.12** `requirements-linux.lock`.
+A fresh checkout can build without local `.locks/` files or a resolver installed:
 
 ```powershell
-& $Python scripts/lock_dependencies.py --platform linux
 docker build --pull -t ai-router:local .
 docker run --rm --name ai-router --env-file .env -p 127.0.0.1:8000:8000 --read-only --tmpfs /tmp:rw,noexec,nosuid,size=32m --cap-drop ALL --security-opt no-new-privileges --memory 512m --cpus 1 --stop-timeout 50 ai-router:local
 ```
@@ -161,6 +161,9 @@ hash lock, runs UID/GID 10001, and excludes the dashboard and secrets. It checks
 `/health/live`; configure orchestrator readiness separately.
 `docker stop --time 50 ai-router` allows the 45-second Uvicorn graceful shutdown.
 No HTTPS proxy or public dashboard is installed by this image.
+For reviewed lock updates and exact Render service/environment settings, follow
+the [Render deployment guide](docs/render.md). CI checks the lock by resolving
+twice and builds the image from a fresh Git checkout.
 
 ## Verification and evidence
 
@@ -176,8 +179,9 @@ No HTTPS proxy or public dashboard is installed by this image.
 git diff --check
 ```
 
-Regenerate Windows locks before a Windows locked installation after a Docker
-build. Audit both target sets in their respective fresh environments.
+Generate Windows scratch locks before a Windows locked installation. Switching
+scratch targets does not replace the committed Linux deployment lock.
+Audit both target sets in their respective fresh environments.
 All known advisories block CI regardless of severity; feed errors fail closed.
 Mypy covers three declared files, not the entire dynamic router/dashboard.
 Normal tests use deterministic mocks and never call real providers. The opt-in

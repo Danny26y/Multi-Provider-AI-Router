@@ -49,6 +49,7 @@ image-metadata.json
 base-image-manifest.txt
 **/*credentials*.json
 **/*service-account*.json
-# Include only the generated runtime lock; never test/dev snapshots.
-.locks/*
-!.locks/runtime.txt
+# Deployment uses the tracked Linux lock, never local resolver outputs.
+.locks/
+/requirements-*.lock
+!/requirements-linux.lock
