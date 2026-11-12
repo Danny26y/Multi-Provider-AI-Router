@@ -36,7 +36,7 @@ remain 1024. NVIDIA reasoning and visible output share the generation budget,
 so raise the budget when reasoning exhausts it. Actual upstream usage is retained,
 including internally consumed tokens. Separate reasoning fields are omitted from
 the public response. Missing or empty visible content fails over through the
-existing invalid-response path, subject to model eligibility and the total deadline.
+`unusable_output` path, subject to model eligibility and the total deadline.
 The existing phase timeouts and `TOTAL_REQUEST_TIMEOUT_SECONDS` still apply;
 increasing a token budget does not extend the deadline.
 See [NVIDIA's reasoning-model guidance](https://docs.nvidia.com/nim/large-language-models/1.15.0/reasoning-model.html)

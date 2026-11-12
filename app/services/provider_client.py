@@ -9,7 +9,7 @@ from typing import Optional, Union
 import httpx
 from pydantic import ValidationError
 
-from app.core.circuit_breaker import circuit_breaker
+from app.core.circuit_breaker import CircuitAdmission, circuit_breaker
 from app.core.logging import log_event
 from app.core.metrics import (
     COMPLETIONS,
@@ -132,12 +132,13 @@ class MultiProviderClient:
             if not config.get("api_key"):
                 diagnostics.append({"provider": provider_name, "outcome": "skipped", "category": "missing_credentials"})
                 continue
-            if not circuit_breaker.is_available(provider_name):
+            admission = circuit_breaker.acquire(provider_name)
+            if admission is None:
                 diagnostics.append({"provider": provider_name, "outcome": "skipped", "category": "circuit_open"})
                 continue
 
-            started_at = time.monotonic()
             try:
+                started_at = time.monotonic()
                 remaining_seconds = deadline - started_at
                 if remaining_seconds <= 0:
                     diagnostics.append({"provider": provider_name, "outcome": "skipped", "category": "deadline_exceeded"})
@@ -158,36 +159,40 @@ class MultiProviderClient:
                         )
                     except (AttributeError, TypeError, ValidationError, ValueError, OverflowError, RecursionError) as error:
                         category = error.category if isinstance(error, UpstreamResponseError) else "invalid_response"
-                        self._handle_failure(provider_name, category)
+                        self._handle_failure(provider_name, category, admission=admission)
                         diagnostics.append({"provider": provider_name, "outcome": "failed", "category": category})
                         continue
 
                     if time.monotonic() >= deadline:
                         diagnostics.append({"provider": provider_name, "outcome": "failed", "category": "deadline_exceeded"})
                         break
-                    circuit_breaker.record_success(provider_name)
+                    circuit_breaker.record_success(provider_name, admission=admission)
                     log_event(logger, logging.INFO, "provider_request_succeeded", provider=provider_name, latency_seconds=latency)
                     return response
 
                 _, _, category, _, retry_after_seconds = result
-                self._handle_failure(provider_name, category, retry_after_seconds)
+                self._handle_failure(provider_name, category, retry_after_seconds, admission=admission)
                 diagnostics.append({"provider": provider_name, "outcome": "failed", "category": category})
             finally:
                 # Covers caller cancellation, unexpected exceptions, and inconclusive probes.
-                circuit_breaker.record_neutral(provider_name)
+                circuit_breaker.record_neutral(provider_name, admission=admission)
 
         raise RoutingError(diagnostics, deadline_exceeded=time.monotonic() >= deadline)
 
-    def _handle_failure(self, provider_name: str, category: str, retry_after_seconds: Optional[float] = None) -> None:
+    def _handle_failure(
+        self, provider_name: str, category: str, retry_after_seconds: Optional[float] = None,
+        *, admission: CircuitAdmission,
+    ) -> None:
         affects_health = category in HEALTH_FAILURES
         if affects_health:
             circuit_breaker.record_failure(
                 provider_name,
                 force_open=category == "rate_limited",
                 retry_after_seconds=retry_after_seconds,
+                admission=admission,
             )
         else:
-            circuit_breaker.record_neutral(provider_name)
+            circuit_breaker.record_neutral(provider_name, admission=admission)
         self._record_provider_failure(provider_name, category, affects_health)
 
     def _record_provider_failure(self, provider_name: str, category: str, retryable: bool) -> None:

@@ -1,0 +1,35 @@
+{
+  "scope": "native local mock HTTP; no live provider or deployment",
+  "platform": "Windows-11-10.0.26100-SP0",
+  "python": "3.12.8",
+  "logical_cpus": 4,
+  "resource_limits": "No CPU or memory isolation applied",
+  "users": 2,
+  "spawn_per_second": 1,
+  "requested_seconds": 20,
+  "wait_seconds": [
+    0.1,
+    0.5
+  ],
+  "workers": 1,
+  "scenario": "success",
+  "client_rate_limit_per_minute": 10000,
+  "router_concurrency": 20,
+  "warmup": "One authenticated preflight completion before measurement; fresh server per run",
+  "packages": {
+    "locust": "2.47.0",
+    "fastapi": "0.162.2",
+    "httpx": "0.28.1",
+    "uvicorn": "0.30.1"
+  },
+  "source_commit": "9a200359fe96052f1d856a7a8ec572af188c945a",
+  "source_state": "Working tree; workload file hashes identify the measured harness",
+  "sha256": {
+    "benchmarks/locustfile.py": "e490adfba6044704de00aff589cf241a143cd656a7b7bec5421519c1ef77a472",
+    "benchmarks/mock_upstream.py": "ceb51870f287331ce1b147c8c2c3c150bd02272de2d733014752ebe5399797a7",
+    "benchmarks/observations.py": "3139acb30d12a9c34e87bc3b00a27770c265f91047c124a995ca428dc24c12c7",
+    "scripts/demo.py": "3c64ab34ca8a91b8f5f74d71e01f2bfea9427bb3e5c3fd6f4effc594ed5e2d70",
+    "scripts/benchmark_local.py": "a7e49fe1789ffd39e9c4c236bb75f948e9546fbedff74b3ddb4ca433a93b6c07",
+    "requirements-benchmark.txt": "8fda1228e32b9b59be1c44a6aade129cbe5ef0cb97e0bc6e45f5daac80a59874"
+  }
+}

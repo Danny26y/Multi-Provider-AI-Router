@@ -344,8 +344,8 @@ def test_malformed_json_opens_breaker_after_threshold(route):
 
 def test_circuit_skip_is_distinct_from_an_attempt_and_success_resets_health(route):
     client, breaker = route
-    breaker.record_failure("groq_fast", force_open=True)
-    breaker.record_failure("nvidia")
+    breaker.record_failure("groq_fast", force_open=True, admission=breaker.acquire("groq_fast"))
+    breaker.record_failure("nvidia", admission=breaker.acquire("nvidia"))
 
     def handler(req):
         body = completion()
@@ -367,7 +367,7 @@ def test_neutral_recovery_probes_release_half_open_without_adding_failures(route
     only_fast(client)
     clock = [100.0]
     monkeypatch.setattr("app.core.circuit_breaker.time", SimpleNamespace(monotonic=lambda: clock[0]))
-    breaker.record_failure("groq_fast", force_open=True)
+    breaker.record_failure("groq_fast", force_open=True, admission=breaker.acquire("groq_fast"))
     clock[0] += 10
     body = completion()
     if kind == "unusable":
@@ -532,7 +532,7 @@ def test_oversized_usage_fails_over_and_releases_recovery_probe(route, monkeypat
     client, breaker = route
     clock = [100.0]
     monkeypatch.setattr("app.core.circuit_breaker.time", SimpleNamespace(monotonic=lambda: clock[0]))
-    breaker.record_failure("groq_fast", force_open=True)
+    breaker.record_failure("groq_fast", force_open=True, admission=breaker.acquire("groq_fast"))
     clock[0] += 10
     attempts = []
 
@@ -560,7 +560,7 @@ def test_unexpected_exit_cannot_leave_recovery_probe_stuck(route, monkeypatch, e
     only_fast(client)
     clock = [100.0]
     monkeypatch.setattr("app.core.circuit_breaker.time", SimpleNamespace(monotonic=lambda: clock[0]))
-    breaker.record_failure("groq_fast", force_open=True)
+    breaker.record_failure("groq_fast", force_open=True, admission=breaker.acquire("groq_fast"))
     clock[0] += 10
 
     def handler(_):

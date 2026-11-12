@@ -99,13 +99,15 @@ def test_circuit_transition_counter_counts_changes_not_observations(monkeypatch)
     breaker = CircuitBreaker(recovery_time_seconds=10)
     labels = {"provider": "groq_fast", "from_state": "healthy", "to_state": "unhealthy"}
     before = sample("ai_router_circuit_transitions_total", **labels)
-    breaker.record_failure("groq_fast", force_open=True)
-    breaker.record_failure("groq_fast", force_open=True)
+    older = breaker.acquire("groq_fast")
+    breaker.record_failure("groq_fast", force_open=True, admission=breaker.acquire("groq_fast"))
+    breaker.record_failure("groq_fast", force_open=True, admission=older)
     breaker.is_available("groq_fast")
     assert sample("ai_router_circuit_transitions_total", **labels) == before + 1
     clock[0] += 10
-    assert breaker.is_available("groq_fast")
-    breaker.record_success("groq_fast")
+    probe = breaker.acquire("groq_fast")
+    assert probe is not None
+    breaker.record_success("groq_fast", admission=probe)
     assert sample("ai_router_circuit_state", provider="groq_fast") == 0
 
 

@@ -33,7 +33,7 @@ jobs:
         run: python -m pip install uv==0.13.4
 
       - name: Generate dated hash locks
-        run: python scripts/lock_dependencies.py --platform linux
+        run: python scripts/lock_dependencies.py --platform linux --benchmark
 
       - name: Install locked development and dashboard dependencies
         run: python -m pip install --require-hashes -r .locks/ci.txt
@@ -45,15 +45,16 @@ jobs:
         run: |
           python -m pip_audit -r .locks/runtime.txt --no-deps --disable-pip --strict --format json --output audit-runtime.json
           python -m pip_audit -r .locks/ci.txt --no-deps --disable-pip --strict --format json --output audit-ci.json
+          python -m pip_audit -r .locks/benchmark.txt --no-deps --disable-pip --strict --format json --output audit-benchmark.json
 
       - name: Lint with Ruff
-        run: python -m ruff check app config main.py dashboard.py scripts tests
+        run: python -m ruff check app config main.py dashboard.py test_failover.py scripts tests benchmarks
 
       - name: Type check
         run: python -m mypy
 
       - name: Compile application modules
-        run: python -m compileall app config main.py dashboard.py scripts
+        run: python -m compileall app config main.py dashboard.py test_failover.py scripts benchmarks
 
       - name: Verify application import
         run: python -c "import main"

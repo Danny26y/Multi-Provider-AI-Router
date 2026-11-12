@@ -16,7 +16,11 @@ curl -X POST https://router.example.com/v1/chat/completions \
   -d '{"messages":[{"role":"user","content":"Explain circuit breakers."}]}'
 ```
 
-The response includes `provider_used`, `fallback_used`, request latency, token usage, and non-sensitive routing diagnostics. It never includes provider credentials or raw upstream exception content.
+The response includes `provider_used`, `fallback_used`, selected-provider-attempt
+`latency_seconds`, token usage, and sanitized routing diagnostics. That latency
+does not include prior attempts or API queue time; measure client wall time or
+the routing histogram for a broader duration. Responses omit provider credentials
+and raw upstream exception content.
 
 ## Completion validation and diagnostics
 

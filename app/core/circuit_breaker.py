@@ -1,5 +1,6 @@
 import threading
 import time
+from dataclasses import dataclass
 from enum import Enum
 from typing import Dict
 
@@ -10,6 +11,14 @@ class ProviderStatus(str, Enum):
     HEALTHY = "healthy"
     DEGRADED = "degraded"
     UNHEALTHY = "unhealthy"
+
+
+@dataclass(frozen=True, eq=False)
+class CircuitAdmission:
+    """Opaque, single-use permission belonging to one breaker/provider epoch."""
+
+    provider: str
+    generation: int
 
 
 class CircuitBreaker:
@@ -27,78 +36,99 @@ class CircuitBreaker:
                 "cooldown_until": 0.0,
                 "status": ProviderStatus.HEALTHY,
                 "probe_in_flight": False,
+                "generation": 0,
+                "admissions": set(),
             }
         return self._states[provider_name]
 
     def is_available(self, provider_name: str) -> bool:
+        """Observe availability without claiming a recovery probe; use acquire to send."""
         with self._lock:
             state = self._get_provider_state(provider_name)
-            if state["status"] == ProviderStatus.HEALTHY:
-                record_circuit_state(provider_name, state["status"].value)
-                return True
-            if state["status"] == ProviderStatus.DEGRADED:
-                record_circuit_state(provider_name, state["status"].value)
-                return False
-
-            if time.monotonic() < state["cooldown_until"]:
-                record_circuit_state(provider_name, state["status"].value)
-                return False
-
-            record_transition(provider_name, state["status"].value, ProviderStatus.DEGRADED.value)
-            state["status"] = ProviderStatus.DEGRADED
-            state["probe_in_flight"] = True
             record_circuit_state(provider_name, state["status"].value)
-            return True
+            return state["status"] == ProviderStatus.HEALTHY or (
+                state["status"] == ProviderStatus.UNHEALTHY and time.monotonic() >= state["cooldown_until"]
+            )
 
-    def record_success(self, provider_name: str) -> None:
+    def _transition(self, provider_name: str, state: dict, status: ProviderStatus) -> None:
+        """Called only under _lock. Every transition fences all older callbacks."""
+        if state["status"] != status:
+            record_transition(provider_name, state["status"].value, status.value)
+            state["generation"] += 1
+            state["admissions"].clear()
+            state["status"] = status
+        state["probe_in_flight"] = status == ProviderStatus.DEGRADED
+        record_circuit_state(provider_name, status.value)
+
+    def acquire(self, provider_name: str) -> CircuitAdmission | None:
+        """Atomically admit a healthy request or the sole half-open recovery probe."""
         with self._lock:
             state = self._get_provider_state(provider_name)
-            # An older concurrent request cannot clear a circuit opened since it started.
-            # Recovery must first be admitted by is_available as a half-open probe.
             if state["status"] == ProviderStatus.UNHEALTHY:
-                return
-            state["failures"] = 0
-            record_transition(provider_name, state["status"].value, ProviderStatus.HEALTHY.value)
-            state["status"] = ProviderStatus.HEALTHY
-            state["probe_in_flight"] = False
+                if time.monotonic() < state["cooldown_until"]:
+                    return None
+                self._transition(provider_name, state, ProviderStatus.DEGRADED)
+            elif state["status"] == ProviderStatus.DEGRADED:
+                return None
+            admission = CircuitAdmission(provider_name, state["generation"])
+            state["admissions"].add(admission)
             record_circuit_state(provider_name, state["status"].value)
+            return admission
+
+    def _consume(self, provider_name: str, state: dict, admission: CircuitAdmission | None) -> bool:
+        if (
+            not isinstance(admission, CircuitAdmission) or admission.provider != provider_name
+            or admission.generation != state["generation"] or admission not in state["admissions"]
+        ):
+            return False
+        state["admissions"].remove(admission)
+        return True
+
+    def record_success(self, provider_name: str, *, admission: CircuitAdmission | None = None) -> bool:
+        with self._lock:
+            state = self._states.get(provider_name)
+            if state is None or not self._consume(provider_name, state, admission):
+                return False
+            state["failures"] = 0
+            self._transition(provider_name, state, ProviderStatus.HEALTHY)
+            return True
 
     def record_failure(
         self,
         provider_name: str,
         force_open: bool = False,
         retry_after_seconds: float | None = None,
-    ) -> None:
+        *,
+        admission: CircuitAdmission | None = None,
+    ) -> bool:
         with self._lock:
-            state = self._get_provider_state(provider_name)
+            state = self._states.get(provider_name)
+            if state is None or not self._consume(provider_name, state, admission):
+                return False
             state["last_failure"] = time.monotonic()
             cooldown = max(self.recovery_time_seconds, retry_after_seconds or 0.0)
             state["cooldown_until"] = max(state["cooldown_until"], state["last_failure"] + cooldown)
-            state["probe_in_flight"] = False
-
             if state["status"] == ProviderStatus.DEGRADED or force_open:
                 state["failures"] = self.failure_threshold
-                record_transition(provider_name, state["status"].value, ProviderStatus.UNHEALTHY.value)
-                state["status"] = ProviderStatus.UNHEALTHY
-                record_circuit_state(provider_name, state["status"].value)
-                return
+                self._transition(provider_name, state, ProviderStatus.UNHEALTHY)
+                return True
 
             state["failures"] += 1
             if state["failures"] >= self.failure_threshold:
-                record_transition(provider_name, state["status"].value, ProviderStatus.UNHEALTHY.value)
-                state["status"] = ProviderStatus.UNHEALTHY
+                self._transition(provider_name, state, ProviderStatus.UNHEALTHY)
             record_circuit_state(provider_name, state["status"].value)
+            return True
 
-    def record_neutral(self, provider_name: str) -> None:
+    def record_neutral(self, provider_name: str, *, admission: CircuitAdmission | None = None) -> bool:
         """Release an inconclusive recovery probe without adding a health failure."""
         with self._lock:
-            state = self._get_provider_state(provider_name)
+            state = self._states.get(provider_name)
+            if state is None or not self._consume(provider_name, state, admission):
+                return False
             if state["status"] == ProviderStatus.DEGRADED:
-                state["probe_in_flight"] = False
-                record_transition(provider_name, state["status"].value, ProviderStatus.UNHEALTHY.value)
-                state["status"] = ProviderStatus.UNHEALTHY
-                state["cooldown_until"] = time.monotonic() + self.recovery_time_seconds
-                record_circuit_state(provider_name, state["status"].value)
+                state["cooldown_until"] = max(state["cooldown_until"], time.monotonic() + self.recovery_time_seconds)
+                self._transition(provider_name, state, ProviderStatus.UNHEALTHY)
+            return True
 
     def snapshot(self) -> Dict[str, dict]:
         with self._lock:

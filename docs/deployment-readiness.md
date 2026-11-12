@@ -5,6 +5,9 @@ security, and container checks have succeeded in a connected environment.
 
 ## Local verification after remediation
 
+This section records Checkpoint E. See [Checkpoint F verification](verification.md)
+for the later documentation, harness, and final review results.
+
 - Fresh hash-locked Windows Python 3.12.8 and Linux/amd64 Python 3.12.16
   environments: **238 passed, 97% coverage each**. Linux was executed in Docker,
   not inferred from Windows results. Both environments passed `pip check`, Ruff,
@@ -57,7 +60,9 @@ Python 3.12 is the supported release interpreter. Direct dependency inputs are
 exact pins in `requirements.txt`, `requirements-dev.txt`, and
 `requirements-dashboard.txt`. The optional dashboard no longer installs unused
 Plotly or Requests; its networking uses the runtime HTTPX dependency. Benchmarks
-remain optional and are outside this checkpoint's supported release lock scope.
+remain optional. Checkpoint F adds `--benchmark` to generate `.locks/benchmark.txt`,
+constrained by the CI lock, and audits that optional set without installing Locust
+in the API image or requiring it for normal pytest collection.
 
 Use the pinned resolver `uv==0.13.4` with the fixed resolution cutoff
 `2026-11-08T00:00:00Z` and explicit Python/platform target. This is an **as-of
