@@ -29,6 +29,9 @@ benchmarks/results/
 .idea/
 .vscode/
 .locks/
+# Only the reviewed Linux/Python 3.12 deployment lock belongs in source control.
+/requirements-*.lock
+!/requirements-linux.lock
 audit-*.json
 # Reviewed benchmark evidence only; unrelated generated audit reports stay ignored.
 !benchmarks/evidence/2026-11-11-windows/audit-benchmark.json

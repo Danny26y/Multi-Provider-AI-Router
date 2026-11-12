@@ -70,6 +70,8 @@ resolution strategy**. `scripts/lock_dependencies.py` generates `.locks/runtime.
 and `.locks/ci.txt` with exact transitive versions and distribution hashes. CI
 installs only these generated locks using `--require-hashes` and archives them.
 The CI set includes the optional dashboard so headless UI tests execute, not skip.
+The API image instead installs the reviewed, committed `requirements-linux.lock`;
+it never depends on ignored local output being present in a fresh checkout.
 
 ```powershell
 python -m pip install uv==0.13.4
@@ -78,8 +80,23 @@ python -m venv .venv
 .venv/Scripts/python -m pip install --require-hashes -r .locks/ci.txt
 ```
 
-For the Linux image, generate with `--platform linux`; do not feed a Windows lock
-to Docker. A release consists of the reviewed source SHA, generated Linux locks,
+To update the deployable Linux runtime artifact, use the existing pinned resolver:
+
+```powershell
+python scripts/lock_dependencies.py --platform linux --update-runtime-lock
+python scripts/lock_dependencies.py --platform linux --check-runtime-lock
+```
+
+Review and commit `requirements-linux.lock` with runtime-input/policy changes.
+Check mode resolves twice into temporary ignored files and compares both results
+byte-for-byte with the committed artifact; it never overwrites that artifact.
+Canonical LF output excludes uv's path-dependent header and annotations. CI
+audits this exact file, then builds from a separate fresh Git checkout, without
+`.locks/`. Windows/development/benchmark scratch locks remain ignored. See the
+[Render settings](render.md) for the hosted Docker build.
+
+Do not feed a Windows lock to Docker. A release consists of the reviewed source
+SHA, committed Linux runtime lock, generated development locks,
 resolver/cutoff, audit reports, base-image digest, and final image digest. Reuse
 the archived locks when rebuilding a release; do not re-resolve them. Package
 yanks or index availability can affect fresh as-of resolutions, so the archived
@@ -205,10 +222,10 @@ and 512 MiB for the API, plus separate headroom for ingress and an optional
 dashboard (start with 1 GiB for Streamlit and measure). Shared free-tier memory
 may be insufficient for the dashboard; omit it or access it locally by SSH tunnel.
 
-Generate Linux locks, then build an immutable image tagged with the source SHA:
+Verify the committed Linux lock, then build an immutable image tagged with the source SHA:
 
 ```sh
-python scripts/lock_dependencies.py --platform linux
+python scripts/lock_dependencies.py --platform linux --check-runtime-lock
 docker build --pull -t ai-router:REVIEWED_SHA .
 docker image inspect ai-router:REVIEWED_SHA
 ```

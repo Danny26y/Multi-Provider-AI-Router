@@ -1,2 +1,4 @@
 # Preserve reviewed evidence bytes so SHA256SUMS survives cross-platform checkout.
 benchmarks/evidence/** -text
+# Canonical resolver output must compare byte-for-byte on Windows and Linux.
+requirements-linux.lock text eol=lf
