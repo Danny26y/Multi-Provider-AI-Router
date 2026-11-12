@@ -28,3 +28,10 @@ benchmarks/results/
 
 .idea/
 .vscode/
+.locks/
+audit-*.json
+# Reviewed benchmark evidence only; unrelated generated audit reports stay ignored.
+!benchmarks/evidence/2026-11-11-windows/audit-benchmark.json
+coverage.xml
+image-metadata.json
+base-image-manifest.txt

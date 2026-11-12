@@ -4,7 +4,6 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any
 
-
 request_id_context: ContextVar[str] = ContextVar("request_id", default="")
 
 

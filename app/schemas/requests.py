@@ -4,7 +4,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from config.settings import settings
 
-
 MessageRole = Literal["system", "user", "assistant"]
 MAX_MESSAGE_CONTENT_CHARS = 20_000
 MAX_REQUEST_CONTENT_CHARS = 100_000
@@ -31,7 +30,7 @@ class ChatCompletionRequest(BaseModel):
     model: Optional[Annotated[str, Field(min_length=1, max_length=128)]] = None
     messages: Annotated[list[ChatMessage], Field(min_length=1, max_length=100)]
     temperature: Annotated[float, Field(ge=0.0, le=2.0)] = 0.7
-    max_tokens: Annotated[int, Field(ge=1, le=4096)] = 1024
+    max_tokens: Annotated[int, Field(ge=1, le=settings.MAX_OUTPUT_TOKENS)] = 1024
     stream: bool = False
 
     @model_validator(mode="after")
@@ -53,6 +52,10 @@ class ProviderDiagnostic(BaseModel):
     provider: str
     outcome: str
     category: Optional[str] = None
+    attempted: bool = False
+    selected: bool = False
+    fallback_used: bool = False
+    circuit_breaker_affected: bool = False
 
 
 class ChatCompletionResponse(BaseModel):

@@ -1,41 +1,18 @@
-# test_failover.py
-import requests
-import json
+"""Legacy manual command; use scripts/demo.py for configurable demonstrations.
 
-URL = "http://localhost:8000/v1/chat/completions"
-HEALTH_URL = "http://localhost:8000/health"
+Collection/import never starts services or calls a provider. Direct invocation
+runs an authenticated, deterministic loopback fallback demonstration and exits.
+"""
 
-payload = {
-    "messages": [
-        {"role": "user", "content": "Explain what a rate limit is in one short sentence."}
-    ]
-}
+import subprocess
+import sys
+from pathlib import Path
 
-def run_test():
-    print("=" * 60)
-    print("🧪 MULTI-PROVIDER PROXY LOAD & FAILOVER TEST")
-    print("=" * 60)
 
-    for i in range(1, 6):
-        print(f"\n--- Request #{i} ---")
-        try:
-            res = requests.post(URL, json=payload, timeout=10)
-            if res.status_code == 200:
-                data = res.json()
-                provider = data.get("provider_used", "unknown")
-                content = data["choices"][0]["message"]["content"]
-                print(f"✅ Success! Provider Used: [{provider}]")
-                print(f"   Response Preview: {content[:80]}...")
-            else:
-                print(f"❌ Error {res.status_code}: {res.text}")
-        except Exception as e:
-            print(f"❌ Request Failed: {e}")
+def run_test() -> int:
+    script = Path(__file__).resolve().parent / "scripts" / "demo.py"
+    return subprocess.call([sys.executable, str(script), "--scenario", "fallback", "--verify-only"])
 
-    print("\n" + "=" * 60)
-    print("📊 CHECKING PROVIDER HEALTH STATES:")
-    print("=" * 60)
-    health_res = requests.get(HEALTH_URL).json()
-    print(json.dumps(health_res, indent=2))
 
 if __name__ == "__main__":
-    run_test()
+    raise SystemExit(run_test())

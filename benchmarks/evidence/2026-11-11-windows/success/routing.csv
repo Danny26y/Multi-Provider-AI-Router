@@ -1,0 +1,2 @@
+scope,elapsed_seconds,requests,failures,requests_per_second,p50_ms,p95_ms,success_rate,failure_rate
+"local mock, single Locust process",18.70299999999952,115,0,6.148746190450888,12,46,1.0,0.0

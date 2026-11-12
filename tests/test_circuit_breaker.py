@@ -1,5 +1,6 @@
-from app.core.circuit_breaker import CircuitBreaker, ProviderStatus
 from concurrent.futures import ThreadPoolExecutor
+
+from app.core.circuit_breaker import CircuitBreaker, ProviderStatus
 
 
 def test_opens_after_failure_threshold_and_allows_one_recovery_probe(monkeypatch):
@@ -7,14 +8,14 @@ def test_opens_after_failure_threshold_and_allows_one_recovery_probe(monkeypatch
     monkeypatch.setattr("app.core.circuit_breaker.time.monotonic", lambda: clock[0])
     breaker = CircuitBreaker(failure_threshold=3, recovery_time_seconds=30)
 
-    breaker.record_failure("provider")
-    breaker.record_failure("provider")
+    breaker.record_failure("provider", admission=breaker.acquire("provider"))
+    breaker.record_failure("provider", admission=breaker.acquire("provider"))
     assert breaker.is_available("provider")
-    breaker.record_failure("provider")
+    breaker.record_failure("provider", admission=breaker.acquire("provider"))
     assert not breaker.is_available("provider")
 
     clock[0] += 30
-    assert breaker.is_available("provider")
+    assert breaker.acquire("provider") is not None
     assert breaker._states["provider"]["status"] == ProviderStatus.DEGRADED
     assert not breaker.is_available("provider")
 
@@ -24,10 +25,11 @@ def test_successful_recovery_resets_breaker(monkeypatch):
     monkeypatch.setattr("app.core.circuit_breaker.time.monotonic", lambda: clock[0])
     breaker = CircuitBreaker(failure_threshold=1, recovery_time_seconds=10)
 
-    breaker.record_failure("provider")
+    breaker.record_failure("provider", admission=breaker.acquire("provider"))
     clock[0] += 10
-    assert breaker.is_available("provider")
-    breaker.record_success("provider")
+    probe = breaker.acquire("provider")
+    assert probe is not None
+    breaker.record_success("provider", admission=probe)
 
     state = breaker.snapshot()["provider"]
     assert state["status"] == ProviderStatus.HEALTHY
@@ -40,15 +42,16 @@ def test_failed_recovery_probe_and_rate_limit_open_circuit_immediately(monkeypat
     monkeypatch.setattr("app.core.circuit_breaker.time.monotonic", lambda: clock[0])
     breaker = CircuitBreaker(failure_threshold=3, recovery_time_seconds=10)
 
-    breaker.record_failure("rate_limited", force_open=True)
+    breaker.record_failure("rate_limited", force_open=True, admission=breaker.acquire("rate_limited"))
     assert not breaker.is_available("rate_limited")
 
-    breaker.record_failure("provider")
-    breaker.record_failure("provider")
-    breaker.record_failure("provider")
+    breaker.record_failure("provider", admission=breaker.acquire("provider"))
+    breaker.record_failure("provider", admission=breaker.acquire("provider"))
+    breaker.record_failure("provider", admission=breaker.acquire("provider"))
     clock[0] += 10
-    assert breaker.is_available("provider")
-    breaker.record_failure("provider")
+    probe = breaker.acquire("provider")
+    assert probe is not None
+    breaker.record_failure("provider", admission=probe)
     assert not breaker.is_available("provider")
 
 
@@ -56,10 +59,25 @@ def test_concurrent_half_open_allows_only_one_recovery_probe(monkeypatch):
     clock = [100.0]
     monkeypatch.setattr("app.core.circuit_breaker.time.monotonic", lambda: clock[0])
     breaker = CircuitBreaker(failure_threshold=1, recovery_time_seconds=10)
-    breaker.record_failure("provider")
+    breaker.record_failure("provider", admission=breaker.acquire("provider"))
     clock[0] += 10
 
     with ThreadPoolExecutor(max_workers=8) as executor:
-        results = list(executor.map(lambda _: breaker.is_available("provider"), range(8)))
+        results = list(executor.map(lambda _: breaker.acquire("provider") is not None, range(8)))
 
     assert results.count(True) == 1
+
+
+def test_older_inflight_failure_cannot_shorten_rate_limit_cooldown(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("app.core.circuit_breaker.time.monotonic", lambda: clock[0])
+    breaker = CircuitBreaker(recovery_time_seconds=10)
+    older = breaker.acquire("limited")
+    breaker.record_failure("limited", force_open=True, retry_after_seconds=60, admission=breaker.acquire("limited"))
+    clock[0] = 101.0
+    breaker.record_failure("limited", admission=older)
+    clock[0] = 111.0
+    assert not breaker.is_available("limited")
+    assert breaker.is_available("unrelated")
+    clock[0] = 160.0
+    assert breaker.is_available("limited")

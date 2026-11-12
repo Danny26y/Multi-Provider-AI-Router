@@ -2,9 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature/nvidia-router-v2]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -12,23 +13,92 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      APP_ENV: testing
+      ENABLE_MOCK_FALLBACK: "false"
+      PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
-        run: python -m pip install -r requirements.txt
+      - name: Install pinned resolver
+        run: python -m pip install uv==0.13.4
+
+      - name: Generate dated hash locks
+        run: python scripts/lock_dependencies.py --platform linux --benchmark
+
+      - name: Install locked development and dashboard dependencies
+        run: python -m pip install --require-hashes -r .locks/ci.txt
+
+      - name: Verify dependency consistency
+        run: python -m pip check
+
+      - name: Check dependency vulnerabilities
+        run: |
+          python -m pip_audit -r .locks/runtime.txt --no-deps --disable-pip --strict --format json --output audit-runtime.json
+          python -m pip_audit -r .locks/ci.txt --no-deps --disable-pip --strict --format json --output audit-ci.json
+          python -m pip_audit -r .locks/benchmark.txt --no-deps --disable-pip --strict --format json --output audit-benchmark.json
+
+      - name: Lint with Ruff
+        run: python -m ruff check app config main.py dashboard.py test_failover.py scripts tests benchmarks
+
+      - name: Type check
+        run: python -m mypy
 
       - name: Compile application modules
-        run: python -m compileall app config main.py
+        run: python -m compileall app config main.py dashboard.py test_failover.py scripts benchmarks
 
       - name: Verify application import
         run: python -c "import main"
 
       - name: Run deterministic tests
-        run: python -m pytest -v
+        run: python -m pytest -v --cov=app --cov=config --cov=main --cov-report=term-missing --cov-report=xml:coverage.xml
+
+      - name: Verify API image build
+        run: |
+          docker build --pull --tag ai-router:ci .
+          docker image inspect ai-router:ci > image-metadata.json
+          docker buildx imagetools inspect "$(awk '/^FROM / {print $2; exit}' Dockerfile)" > base-image-manifest.txt
+
+      - name: Verify non-root image and orchestrator probes
+        run: |
+          test "$(docker image inspect ai-router:ci --format '{{.Config.User}}')" = "appuser"
+          docker run --detach --name router-ci --read-only --tmpfs /tmp:rw,noexec,nosuid,size=32m --cap-drop ALL --security-opt no-new-privileges --memory 512m --cpus 1 --stop-timeout 50 ai-router:ci
+          trap 'docker rm -f router-ci' EXIT
+          for attempt in $(seq 1 30); do
+            if docker exec router-ci python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=2)"; then break; fi
+            sleep 1
+          done
+          docker exec router-ci python -c "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=2).status == 200"
+          docker exec router-ci python -c "import os; from pathlib import Path; assert os.geteuid() == 10001; assert not Path('/app/.env').exists(); assert not Path('/app/dashboard.py').exists()"
+          docker exec router-ci python -c "import urllib.request, urllib.error; exec('try:\n urllib.request.urlopen(\"http://127.0.0.1:8000/health/ready\", timeout=2)\nexcept urllib.error.HTTPError as e:\n assert e.code == 503\nelse:\n raise AssertionError(\"Unconfigured image must not be ready\")')"
+          docker stop --time 50 router-ci
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+          if-no-files-found: ignore
+
+      - name: Upload release locks and security reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-and-security-evidence
+          path: |
+            .locks/*.txt
+            audit-*.json
+            image-metadata.json
+            base-image-manifest.txt
+          if-no-files-found: ignore
+          retention-days: 14

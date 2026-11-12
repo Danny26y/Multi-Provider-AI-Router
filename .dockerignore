@@ -1,7 +1,8 @@
 .git/
 .env
 .env.*
-!.env.example
+**/.env
+**/.env.*
 
 .venv/
 venv/
@@ -29,3 +30,25 @@ tests/
 test_failover.py
 dashboard.py
 README.md
+docs/
+benchmarks/
+scripts/
+.github/
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+.aws/
+.codex/
+.agents/
+audit-*.json
+coverage.xml
+image-metadata.json
+base-image-manifest.txt
+**/*credentials*.json
+**/*service-account*.json
+# Include only the generated runtime lock; never test/dev snapshots.
+.locks/*
+!.locks/runtime.txt

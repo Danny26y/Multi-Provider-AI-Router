@@ -1,140 +1,208 @@
 # Multi-Provider AI Router
 
-## Overview
+A secured, asynchronous FastAPI gateway for text chat completions across **Groq,
+NVIDIA NIM, and optional Cerebras**. Clients use one API while the router handles
+provider eligibility, response validation, failover, and a shared request deadline.
 
-This FastAPI gateway routes chat-completion requests across configured AI providers, applies circuit-breaker controls, and can use a deterministic mock fallback for local development and tests. It exposes `POST /v1/chat/completions`, public `GET /health/live`, and diagnostic `GET /health` endpoints.
+This engineering portfolio project addresses a practical reliability problem:
+an HTTP 200 from an AI provider does not necessarily contain a usable answer,
+and a fallback must preserve the caller's model constraints and latency budget.
+The repository includes deterministic tests, a no-cost local demonstration,
+an optional Streamlit dashboard, Prometheus instrumentation, and container/CI
+checks. It is **not a production-deployed service**.
 
-The project demonstrates secure request handling, provider routing, deterministic tests, Docker packaging, and CI. It is not presented as production-ready.
+## How routing works
 
-## Routing and circuit breakers
+The default remote order is **Groq fast → NVIDIA NIM → Groq reasoning**.
+Cerebras is supported but disabled by default. The optional local mock fallback
+is also disabled and is allowed only in development/testing.
 
-Providers are evaluated in this order: `groq_fast`, `cerebras_primary`, `groq_reasoning`, then the optional `mock_fallback`.
+1. Check remaining deadline, credentials, model allowlist, and circuit admission.
+2. Attempt each eligible route once, using a shared asynchronous HTTP pool.
+3. Validate JSON, choices, assistant text, finish reason, returned model identity,
+   and supplied usage before selecting a response.
+4. Continue to the next eligible route after failure; return a sanitized HTTP 503
+   if none succeeds. There is no per-provider retry loop.
 
-- Providers without credentials, with open circuits, or incompatible with an explicitly requested model are skipped.
-- A request is sent at most once to an eligible provider; there is no retry loop.
-- Timeouts, connection errors, HTTP 429, 5xx responses, and malformed upstream responses are retryable failures and permit failover.
-- Upstream authentication and invalid-request responses do not open a circuit.
-- Three retryable failures open a circuit; HTTP 429 opens it immediately.
-- After the 30-second default cooldown, exactly one recovery probe is allowed. A successful probe restores the provider; a failed probe reopens the circuit.
-- The `Retry-After` header from an upstream 429 extends that provider's cooldown, up to the configured maximum.
+An explicit `model` is never silently replaced. NVIDIA defaults to
+`nvidia/nemotron-3.5-lightning-30b-a3b`; its allowlist and token budgets are
+configurable. Reasoning-only output is unusable even if all generation tokens
+were consumed. Visible text ending with `finish_reason: length` retains that
+reason so clients can flag possible truncation.
 
-Circuit-breaker state is process-local and resets when the application restarts.
+Availability/reliability failures affect the circuit; authentication, model
+configuration, and unusable output do not add health failures. Three health
+failures open a circuit; HTTP 429 opens it immediately with a provider-scoped,
+bounded `Retry-After` cooldown. After the default 30-second recovery interval,
+one half-open probe is admitted. Inconclusive probes release their slot and wait
+another interval. State is process-local. See [architecture](docs/architecture.md)
+and [failure classification](docs/operations.md#failure-classification-and-circuit-health).
 
-## Setup and configuration
+## Install on Python 3.12
 
-Python 3.10 or newer is required.
+From the repository root in Windows PowerShell:
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+py -3.12 -m venv .venv/local
+$Python = "$PWD/.venv/local/Scripts/python.exe"
+& $Python -m pip install uv==0.13.4
+$env:Path = "$PWD/.venv/local/Scripts;$env:Path"
+& $Python scripts/lock_dependencies.py --platform windows
+& $Python -m pip install --require-hashes -r .locks/ci.txt
 Copy-Item .env.example .env
 ```
 
-Set a long, random router key before serving chat requests:
+The CI lock includes development/test and optional dashboard dependencies.
+For runtime only, install `.locks/runtime.txt` instead. On Linux use
+`python3.12 -m venv .venv/local`, `.venv/local/bin/python`, add
+`.venv/local/bin` to `PATH`, and generate with `--platform linux`.
+The script writes the same two filenames for each platform: archive locks before
+switching targets. Resolution requires network access; installation is hash-locked.
+See [dependency policy](docs/deployment-readiness.md#dependency-and-ci-policy).
 
-```ini
-ROUTER_API_KEY=generate_a_long_random_value
-APP_ENV=development
-ENABLE_MOCK_FALLBACK=false
-GROQ_API_KEY=your_groq_api_key
-CEREBRAS_API_KEY=your_cerebras_api_key
-```
-
-Provider order, default models, timeout phases, the total routing deadline, local client limits, fallback policy, and per-model pricing are configurable through environment variables. See `.env.example` for the complete set. Collection values such as `PROVIDER_ORDER` and `MODEL_PRICES_USD_PER_MILLION_TOKENS` use JSON syntax.
-
-`X-API-Key` authentication is required for `POST /v1/chat/completions`. If `ROUTER_API_KEY` is absent, the endpoint fails closed with HTTP 503. Keep `.env` local; it is excluded by `.gitignore` and `.dockerignore`.
-
-The mock fallback is disabled by default. It can be enabled only when `APP_ENV` is `development` or `testing` and `ENABLE_MOCK_FALLBACK=true`. Production requests receive HTTP 503 when no real provider returns a valid response.
-
-## Run and use the API
+## Try it without provider access
 
 ```powershell
-python main.py
+& $Python scripts/demo.py --scenario fallback --verify-only
+& $Python scripts/demo.py --scenario fallback --dashboard
 ```
 
-The server listens at `http://localhost:8000`; OpenAPI documentation is at `http://localhost:8000/docs`.
+The second command leaves a loopback router, mock upstream, and dashboard running
+until Ctrl+C. Open `http://127.0.0.1:8501`, check the connection, submit a prompt,
+and inspect the selected provider and fallback diagnostics. Generated demo keys
+stay in child-process environments. No real provider is called. Full scenarios
+and expected results are in the [demonstration guide](docs/demo.md).
 
-```bash
-curl -X POST "http://localhost:8000/v1/chat/completions" \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: your_router_api_key" \
-  -d '{"messages":[{"role":"user","content":"Explain the circuit breaker pattern."}]}'
-```
+## Configure and run with real providers
 
-Supported message roles are `system`, `user`, and `assistant`. Requests require at least one nonempty message, constrain message and total content size, accept temperatures from `0` to `2`, and accept `max_tokens` from `1` to `4096`. Extra fields are rejected. Explicit model values must match a configured provider model; the defaults are `llama-3.1-8b-instant`, `zai-glm-4.7`, and `llama-3.3-70b-versatile`. Omit `model` to preserve provider-order failover. Streaming is not supported.
+Set values in the ignored local `.env` or a deployment secret store:
 
-When development fallback is enabled and no remote provider is eligible, the response contains `provider_used: "mock_fallback"`, `fallback_used: true`, and non-sensitive `routing_diagnostics`. Real-provider responses set `fallback_used` to `false`. Provider response bodies, API keys, and request content are not included in diagnostics or client-facing errors.
+| Configuration | Purpose |
+| --- | --- |
+| `ROUTER_API_KEY` | Required shared secret for chat; absent key fails closed |
+| `GROQ_API_KEY`, `NVIDIA_API_KEY` | Enable corresponding configured routes |
+| `NVIDIA_ENABLED`, `NVIDIA_ALLOWED_MODELS` | NVIDIA eligibility/model policy |
+| `CEREBRAS_ENABLED`, `CEREBRAS_API_KEY` | Optional Cerebras route |
+| `PROVIDER_ORDER` | JSON array of route identifiers |
+| `METRICS_API_KEY` | Separate secret protecting metrics with `X-Metrics-Key` |
+| `TOTAL_REQUEST_TIMEOUT_SECONDS` | Shared routing budget, default 20 seconds |
 
-## Docker
-
-Build the non-root Python 3.12 image from the repository root:
+Generate random keys in a password manager; do not use example placeholders.
+See [.env.example](.env.example) for phase timeouts, token limits, queue/body limits,
+and all configuration names. The API starts on loopback:
 
 ```powershell
-docker build -t multi-provider-ai-router .
+& $Python main.py
 ```
 
-Run with a local `.env` file; the file is read at runtime and is not copied into the image:
+In another terminal, provision `ROUTER_API_KEY` securely in that shell's environment
+(the server's `.env` is not automatically loaded by PowerShell), then call:
 
 ```powershell
-docker run --rm --name multi-provider-ai-router -p 8000:8000 --env-file .env multi-provider-ai-router
+$headers = @{ 'X-API-Key' = $env:ROUTER_API_KEY }
+$body = @{ messages = @(@{ role = 'user'; content = 'Explain circuit breakers.' }); temperature = 0.3 } | ConvertTo-Json -Depth 5
+$reply = Invoke-RestMethod http://127.0.0.1:8000/v1/chat/completions -Method Post -Headers $headers -ContentType 'application/json' -Body $body
+$reply.choices[0].message.content
+$reply | Select-Object provider_used, model, fallback_used, latency_seconds, usage, routing_diagnostics
 ```
 
-Verify liveness without credentials:
+Supported roles are `system`, `user`, and `assistant`. Temperature is 0–2;
+`max_tokens` is bounded by configuration. Extra fields and streaming are rejected.
+`latency_seconds` describes the selected provider attempt, not the whole client
+request. Missing upstream usage is estimated and marked; cost is always an estimate.
+API schema: `http://127.0.0.1:8000/docs` and [API guide](docs/api.md).
+
+## Security and operational boundaries
+
+- Chat requires `X-API-Key`; a shared key is not per-user identity or a spending cap.
+- Health endpoints are public and minimal. Readiness checks configuration, not
+  actual provider connectivity or key validity.
+- Set `METRICS_API_KEY` before public exposure; unset preserves public metrics
+  for compatibility. Also restrict metrics through private monitoring ingress.
+- Provider and dashboard HTTP clients disable redirects and environment proxy
+  inheritance. Remote base URLs require HTTPS; HTTP is allowed on loopback.
+- Error bodies, keys, authorization headers, and prompts are omitted from
+  application error diagnostics/logs. Metrics use bounded labels.
+- Rate limits, concurrency, queues, body limits, and circuit state are process-local.
+  Multiple replicas need an explicit shared-state design.
+- The dashboard holds a router key server-side. Anyone who can access it can use
+  that key: bind it locally or require authenticated HTTPS ingress.
+
+See [threat model](docs/threat-model.md) and [deployment preparation](docs/deployment-readiness.md).
+
+## Optional dashboard
+
+The CI dependency set above includes Streamlit. Configure the dashboard server:
 
 ```powershell
-Invoke-RestMethod http://localhost:8000/health/live
+$env:DASHBOARD_ROUTER_URL = 'http://127.0.0.1:8000'
+# Provision DASHBOARD_API_KEY and DASHBOARD_METRICS_API_KEY securely.
+# ROUTER_API_KEY/METRICS_API_KEY are server-side configuration fallbacks.
+& $Python -m streamlit run dashboard.py --server.address 127.0.0.1
 ```
 
-Stop a foreground container with `Ctrl+C`; for a detached container, use:
+All inference goes through the router. The interface distinguishes completed,
+failed, and truncated output; shows observed provider/model/usage/diagnostics;
+and separates **session history**, **response diagnostics**, and **server-wide
+Prometheus snapshots**. Missing values stay missing. See [dashboard guide](docs/dashboard.md).
+
+## Docker startup
+
+Generate **Linux** locks first, even when Docker is invoked from Windows:
 
 ```powershell
-docker stop multi-provider-ai-router
+& $Python scripts/lock_dependencies.py --platform linux
+docker build --pull -t ai-router:local .
+docker run --rm --name ai-router --env-file .env -p 127.0.0.1:8000:8000 --read-only --tmpfs /tmp:rw,noexec,nosuid,size=32m --cap-drop ALL --security-opt no-new-privileges --memory 512m --cpus 1 --stop-timeout 50 ai-router:local
 ```
 
-The image binds Uvicorn to `0.0.0.0:8000` and runs as unprivileged `appuser`; `-p 8000:8000` maps the container port to the host.
+Use Linux containers. The image pins its Python base digest, installs the runtime
+hash lock, runs UID/GID 10001, and excludes the dashboard and secrets. It checks
+`/health/live`; configure orchestrator readiness separately.
+`docker stop --time 50 ai-router` allows the 45-second Uvicorn graceful shutdown.
+No HTTPS proxy or public dashboard is installed by this image.
 
-## Reliability controls
-
-The application owns one `httpx.AsyncClient` for its lifespan instead of opening a new connection pool per upstream request. It applies configurable connect, read, write, and pool timeouts plus one deadline across the complete provider-routing pass.
-
-Client limits are in-process and use the connecting client IP: `CLIENT_RATE_LIMIT_PER_MINUTE` returns HTTP 429 with `Retry-After`, and `MAX_CONCURRENT_REQUESTS` caps concurrent chat handling. These limits and circuit-breaker state are per process. They are appropriate for a single worker; deploy shared Redis-backed state only when scaling to multiple workers or replicas requires globally coordinated limits and breakers.
-
-Provider usage is returned as actual token usage when the upstream response contains complete usage fields. Otherwise the router marks the usage as estimated. `estimated_cost_usd` uses the configured `MODEL_PRICES_USD_PER_MILLION_TOKENS` mapping and is always an estimate.
-
-## Observability
-
-Application logs are JSON records with a request correlation ID. Send `X-Request-ID` to preserve an existing ID, or use the generated ID returned in the response header. Logs and diagnostics contain only safe metadata: provider name, failure category, HTTP status, and latency; they do not include API keys or prompt content.
-
-Prometheus-compatible metrics are exposed at `GET /metrics`:
-
-- `ai_router_http_requests_total` and `ai_router_http_request_duration_seconds`
-- `ai_router_provider_failures_total` and `ai_router_provider_request_duration_seconds`
-- `ai_router_circuit_state` (`healthy=0`, `degraded=1`, `unhealthy=2`)
-
-`GET /health/live` reports whether the process is running. `GET /health/ready` returns 200 only when chat authentication is configured and at least one remote provider or enabled development fallback is available. `GET /health` remains a minimal compatibility status endpoint and does not expose circuit-breaker internals.
-
-## Tests and CI
-
-Run deterministic checks without provider credentials or paid API calls:
+## Verification and evidence
 
 ```powershell
-python -m compileall app config main.py
-python -c "import main"
-python -m pytest -v
+& $Python -m pytest -v --cov=app --cov=config --cov=main --cov-report=term-missing
+& $Python -m ruff check app config main.py dashboard.py test_failover.py scripts tests benchmarks
+& $Python -m mypy
+& $Python -m compileall app config main.py dashboard.py test_failover.py scripts benchmarks
+& $Python -c "import main"
+& $Python -m pip check
+& $Python -m pip_audit -r .locks/runtime.txt --no-deps --disable-pip --strict
+& $Python -m pip_audit -r .locks/ci.txt --no-deps --disable-pip --strict
+git diff --check
 ```
 
-`test_failover.py` is a manual local API smoke/load script for a separately running service, not a deterministic test suite.
+Regenerate Windows locks before a Windows locked installation after a Docker
+build. Audit both target sets in their respective fresh environments.
+All known advisories block CI regardless of severity; feed errors fail closed.
+Mypy covers three declared files, not the entire dynamic router/dashboard.
+Normal tests use deterministic mocks and never call real providers. The opt-in
+`scripts/nvidia_smoke.py` requires real credentials and may consume quota.
 
-GitHub Actions CI runs the compile, import, and pytest checks on Ubuntu with Python 3.12 for pushes and pull requests to `main`.
+The Checkpoint E baseline passed **238 tests on Windows and Linux/amd64 with 97%
+reported coverage**, strict dependency audits, and container runtime probes.
+Checkpoint F results and scope are recorded in [verification](docs/verification.md).
+Hosted GitHub Actions has not been executed as part of local verification.
 
-For repeatable load testing against a local mock upstream, follow [benchmarks/README.md](benchmarks/README.md). The harness produces Locust CSV data for throughput, p50, p95, and error rate; no benchmark figures are claimed until a run is recorded.
+## Benchmarks, case study, and limitations
 
-## Limitations
+The [Locust procedure](benchmarks/README.md) uses a local HTTP mock and retains
+CSV/JSON observations. [Recorded results](docs/benchmark-results.md) distinguish
+local mock throughput from live inference and deployed infrastructure. They are
+not provider speed, production capacity, cost, or availability claims.
 
-- Live Groq and Cerebras connectivity is not verified by this repository.
-- Throughput, latency, and availability are not benchmarked.
-- The service has no TLS termination, persistent state, or streaming support.
-- Rate limiting and circuit-breaker state are not shared between workers or replicas.
-- The mock fallback is fixed text, not generated model output.
-- Model selection is limited to the configured provider defaults; an explicit model narrows routing to compatible providers.
+- [Engineering case study](docs/case-study.md)
+- [Architecture and trust boundaries](docs/architecture.md)
+- [Local demonstration](docs/demo.md)
+- [Operations and failure classification](docs/operations.md)
+- [Release/deployment runbook](docs/deployment-readiness.md)
+
+Limitations include no streaming/tool-call output, no persistent/shared limit or
+breaker state, no built-in TLS or Streamlit viewer authentication, and no production
+deployment. Live provider/model compatibility requires an explicitly authorized
+probe. HTTPS ingress, protected dashboard/metrics, OS-image scanning, hosted CI,
+and staging acceptance remain deployment responsibilities.

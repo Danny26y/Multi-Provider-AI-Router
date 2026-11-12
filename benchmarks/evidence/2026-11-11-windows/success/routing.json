@@ -1,0 +1,16 @@
+{
+  "scope": "local mock, single Locust process",
+  "elapsed_seconds": 18.70299999999952,
+  "requests": 115,
+  "failures": 0,
+  "requests_per_second": 6.148746190450888,
+  "p50_ms": 12,
+  "p95_ms": 46,
+  "success_rate": 1.0,
+  "failure_rate": 0.0,
+  "observations": {
+    "selected:groq_fast": 115,
+    "fallback": 0,
+    "truncated": 0
+  }
+}

@@ -1,0 +1,5 @@
+-r requirements.txt
+streamlit==1.66.1
+pandas==3.0.3
+# First supported fixed Pillow major; Streamlit 1.66.1 declares pillow<14.
+pillow==13.0.0
