@@ -50,6 +50,10 @@ def validate_response(data: object, expected_model: str, aliases: list[str]) -> 
             raise UpstreamResponseError()
         if not content or not content.strip() or reason not in {"stop", "length"}:
             raise UpstreamResponseError("unusable_output")
+        # A misconfigured reasoning parser can put private traces in content.
+        # Reject the response rather than attempting to extract a public answer.
+        if "<think>" in content or "</think>" in content:
+            raise UpstreamResponseError("unusable_output")
 
     usage = data.get("usage")
     if usage is not None:

@@ -25,21 +25,25 @@ class Settings(BaseSettings):
     NVIDIA_ALLOWED_MODELS: list[str] = ["nvidia/nemotron-3.5-lightning-30b-a3b"]
     NVIDIA_DEFAULT_MAX_TOKENS: int = Field(default=4096, gt=0)
     NVIDIA_MAX_OUTPUT_TOKENS: int = Field(default=16384, gt=0)
+    NVIDIA_ENABLE_THINKING: bool = False
+    NVIDIA_REASONING_BUDGET: int = Field(default=1024, ge=0, le=16384)
+    NVIDIA_READ_TIMEOUT_SECONDS: float = Field(default=30.0, gt=0, le=120, allow_inf_nan=False)
+    NVIDIA_ATTEMPT_TIMEOUT_SECONDS: float = Field(default=35.0, gt=0, le=120, allow_inf_nan=False)
     MAX_OUTPUT_TOKENS: int = Field(default=16384, gt=0)
     PROVIDER_MODEL_ALIASES: dict[str, dict[str, list[str]]] = {}
 
     GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
     CEREBRAS_BASE_URL: str = "https://api.cerebras.ai/v1"
-    GROQ_FAST_MODEL: str = "llama-3.1-8b-instant"
+    GROQ_FAST_MODEL: str = "openai/gpt-oss-20b"
     CEREBRAS_PRIMARY_MODEL: str = "zai-glm-4.7"
-    GROQ_REASONING_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_REASONING_MODEL: str = "openai/gpt-oss-120b"
     PROVIDER_ORDER: list[str] = ["groq_fast", "nvidia", "groq_reasoning", "cerebras_primary", "mock_fallback"]
 
     REQUEST_CONNECT_TIMEOUT_SECONDS: float = Field(default=3.0, gt=0, allow_inf_nan=False)
     REQUEST_READ_TIMEOUT_SECONDS: float = Field(default=10.0, gt=0, allow_inf_nan=False)
     REQUEST_WRITE_TIMEOUT_SECONDS: float = Field(default=10.0, gt=0, allow_inf_nan=False)
     REQUEST_POOL_TIMEOUT_SECONDS: float = Field(default=3.0, gt=0, allow_inf_nan=False)
-    TOTAL_REQUEST_TIMEOUT_SECONDS: float = Field(default=20.0, gt=0, allow_inf_nan=False)
+    TOTAL_REQUEST_TIMEOUT_SECONDS: float = Field(default=60.0, gt=0, le=180, allow_inf_nan=False)
     MAX_UPSTREAM_RETRY_AFTER_SECONDS: float = Field(default=300.0, gt=0, allow_inf_nan=False)
 
     CLIENT_RATE_LIMIT_PER_MINUTE: int = Field(default=60, gt=0)

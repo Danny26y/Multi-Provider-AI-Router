@@ -46,7 +46,10 @@ class MultiProviderClient:
                 "allowed_models": settings.NVIDIA_ALLOWED_MODELS,
                 "default_max_tokens": settings.NVIDIA_DEFAULT_MAX_TOKENS,
                 "max_output_tokens": settings.NVIDIA_MAX_OUTPUT_TOKENS,
-                "normalize_reasoning": True,
+                "enable_thinking": settings.NVIDIA_ENABLE_THINKING,
+                "reasoning_budget": settings.NVIDIA_REASONING_BUDGET,
+                "read_timeout": settings.NVIDIA_READ_TIMEOUT_SECONDS,
+                "attempt_timeout": settings.NVIDIA_ATTEMPT_TIMEOUT_SECONDS,
             },
             "cerebras_primary": {
                 "base_url": settings.CEREBRAS_BASE_URL,
@@ -284,33 +287,47 @@ class MultiProviderClient:
             "messages": [message.model_dump() for message in request.messages],
             "temperature": request.temperature,
             "max_tokens": output_tokens,
+            "stream": False,
         }
+        # Apply model-specific controls only to the model whose API supports them.
+        if payload["model"] == "nvidia/nemotron-3.5-lightning-30b-a3b" and "enable_thinking" in config:
+            thinking = config["enable_thinking"] and output_tokens > 1
+            payload["chat_template_kwargs"] = {"enable_thinking": thinking}
+            if thinking:
+                # Reserve at least half the caller's budget for visible output.
+                payload["reasoning_budget"] = min(config["reasoning_budget"], output_tokens // 2)
+        if payload["model"] in {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}:
+            payload["reasoning_effort"] = "low"
+        attempt_seconds = min(remaining_seconds, config.get("attempt_timeout", remaining_seconds))
         timeout = httpx.Timeout(
-            connect=min(settings.REQUEST_CONNECT_TIMEOUT_SECONDS, remaining_seconds),
-            read=min(settings.REQUEST_READ_TIMEOUT_SECONDS, remaining_seconds),
-            write=min(settings.REQUEST_WRITE_TIMEOUT_SECONDS, remaining_seconds),
-            pool=min(settings.REQUEST_POOL_TIMEOUT_SECONDS, remaining_seconds),
+            connect=min(settings.REQUEST_CONNECT_TIMEOUT_SECONDS, attempt_seconds),
+            read=min(config.get("read_timeout", settings.REQUEST_READ_TIMEOUT_SECONDS), attempt_seconds),
+            write=min(settings.REQUEST_WRITE_TIMEOUT_SECONDS, attempt_seconds),
+            pool=min(settings.REQUEST_POOL_TIMEOUT_SECONDS, attempt_seconds),
         )
 
         async def exchange() -> httpx.Response:
             async with self.http_client.stream(
                 "POST", url, headers=headers, json=payload, timeout=timeout, follow_redirects=False,
             ) as upstream:
-                if upstream.status_code != 200:
+                if upstream.status_code not in {200, 404}:
                     # Classification needs status/Retry-After only; discard raw error bodies.
                     return httpx.Response(upstream.status_code, headers={"Retry-After": upstream.headers.get("Retry-After", "")})
                 body = bytearray()
                 async for chunk in upstream.aiter_bytes(chunk_size=65536):
-                    if len(body) + len(chunk) > settings.MAX_UPSTREAM_RESPONSE_BYTES:
+                    limit = min(settings.MAX_UPSTREAM_RESPONSE_BYTES, 8192) if upstream.status_code == 404 else settings.MAX_UPSTREAM_RESPONSE_BYTES
+                    if len(body) + len(chunk) > limit:
+                        if upstream.status_code == 404:
+                            return httpx.Response(404)
                         raise UpstreamResponseError()
                     body.extend(chunk)
                 # aiter_bytes has already decoded Content-Encoding; do not decode it twice.
-                return httpx.Response(200, content=bytes(body))
+                return httpx.Response(upstream.status_code, content=bytes(body))
 
         try:
             response = await asyncio.wait_for(
                 exchange(),
-                timeout=remaining_seconds,
+                timeout=attempt_seconds,
             )
         except UpstreamResponseError:
             return False, 502, "invalid_response", True, None
@@ -333,7 +350,15 @@ class MultiProviderClient:
         if response.status_code in {401, 403}:
             return False, response.status_code, "auth_error", False, None
         if response.status_code == 404:
-            return False, 404, "unsupported_model", False, None
+            category = "upstream_not_found"
+            try:
+                data = response.json()
+                error = data.get("error") if isinstance(data, dict) else None
+                if isinstance(error, dict) and error.get("code") == "model_not_found":
+                    category = "unsupported_model"
+            except (ValueError, RecursionError, OverflowError):
+                pass
+            return False, 404, category, False, None
         if response.status_code == 408:
             return False, 408, "timeout", True, None
         return False, response.status_code, "invalid_request", False, None

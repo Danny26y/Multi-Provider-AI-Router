@@ -1,5 +1,9 @@
 # Render deployment preparation
 
+For Checkpoint G inference changes, use the explicit
+[model/deadline environment changes, live acceptance and rollback procedure](checkpoint-g.md).
+Passing the health checks below does not verify authenticated inference.
+
 The API image builds from a fresh Git checkout using the tracked
 `requirements-linux.lock`. No `.env`, Windows lock, development lock, or local
 cache is needed in the Docker context. The lock uses Python 3.12, uv 0.13.4,

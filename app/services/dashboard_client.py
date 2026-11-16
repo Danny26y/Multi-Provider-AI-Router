@@ -14,7 +14,7 @@ from prometheus_client.parser import text_string_to_metric_families
 FAILURE_CATEGORIES = {
     "timeout", "connection_error", "rate_limited", "server_error", "invalid_response",
     "unusable_output", "model_mismatch", "auth_error", "provider_configuration_error",
-    "unsupported_model", "invalid_request", "missing_credentials", "model_not_supported",
+    "unsupported_model", "upstream_not_found", "invalid_request", "missing_credentials", "model_not_supported",
     "fallback_disabled", "deadline_exceeded", "circuit_open", "mock_fallback",
 }
 METRIC_NAMES = {
@@ -39,7 +39,7 @@ class DashboardConfigurationError(ValueError):
 class DashboardConfig:
     base_url: str
     api_key: str = field(default="", repr=False)
-    timeout_seconds: float = 30.0
+    timeout_seconds: float = 75.0
     metrics_api_key: str = field(default="", repr=False)
 
     def __post_init__(self):
@@ -73,7 +73,7 @@ class DashboardConfig:
             return cls(
                 base_url=str(value("DASHBOARD_ROUTER_URL")).rstrip("/"),
                 api_key=str(value("DASHBOARD_API_KEY", value("ROUTER_API_KEY"))),
-                timeout_seconds=float(value("DASHBOARD_REQUEST_TIMEOUT_SECONDS", "30")),
+                timeout_seconds=float(value("DASHBOARD_REQUEST_TIMEOUT_SECONDS", "75")),
                 metrics_api_key=str(value("DASHBOARD_METRICS_API_KEY", value("METRICS_API_KEY"))),
             )
         except (TypeError, ValueError):

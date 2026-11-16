@@ -45,7 +45,7 @@ to a provider and requested model. They permit a returned identity only; they do
 not expand request allowlists or change the outbound model. For example:
 
 ```dotenv
-PROVIDER_MODEL_ALIASES={"groq_fast":{"llama-3.1-8b-instant":["explicitly-approved-version"]}}
+PROVIDER_MODEL_ALIASES={"groq_fast":{"openai/gpt-oss-20b":["explicitly-approved-version"]}}
 ```
 
 Existing diagnostic fields (`provider`, `outcome`, `category`) are retained. Each

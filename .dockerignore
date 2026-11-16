@@ -5,6 +5,7 @@
 **/.env.*
 
 .venv/
+.venv-g/
 venv/
 env/
 ENV/
