@@ -66,7 +66,7 @@ def test_nvidia_explicit_wire_controls(client, thinking, tokens, budget):
 
 
 @pytest.mark.parametrize("model,provider", [("openai/gpt-oss-20b", "groq_fast"), ("openai/gpt-oss-120b", "groq_reasoning")])
-def test_groq_defaults_validate_and_parse(client, model, provider):
+def test_groq_defaults_validate_and_parse(client, model, provider, caplog):
     defaults = Settings(_env_file=None)
     assert getattr(defaults, "GROQ_FAST_MODEL" if provider == "groq_fast" else "GROQ_REASONING_MODEL") == model
     config = client.provider_configs[provider]
@@ -77,11 +77,19 @@ def test_groq_defaults_validate_and_parse(client, model, provider):
         payload = json.loads(req.content)
         assert payload["model"] == model
         assert payload["reasoning_effort"] == "low"
+        assert payload["include_reasoning"] is False
         assert payload["stream"] is False
         assert "reasoning_format" not in payload
-        return httpx.Response(200, json=completion(model=model, reasoning="private"))
+        assert "chat_template_kwargs" not in payload
+        assert "enable_thinking" not in payload
+        assert "reasoning_budget" not in payload
+        return httpx.Response(200, json=completion(model=model, reasoning="private", reasoning_content="private"))
 
-    assert run(client, handler, request(model=model)).provider_used == provider
+    response = run(client, handler, request(model=model))
+    assert response.provider_used == provider
+    assert response.choices[0].message.content == "Hello"
+    assert "private" not in response.model_dump_json() + caplog.text
+    assert set(response.choices[0].message.model_dump()) == {"role", "content"}
 
 
 @pytest.mark.parametrize("change,category", [
@@ -173,3 +181,87 @@ def test_live_probe_requires_valid_completion_without_live_network(client, monke
     monkeypatch.setattr(nvidia_smoke, "MultiProviderClient", lambda: client)
     assert asyncio.run(nvidia_smoke.probe()) == exit_code
     assert "private" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("route,model_field", [
+    ("groq_fast", "GROQ_FAST_MODEL"), ("groq_reasoning", "GROQ_REASONING_MODEL"),
+    ("nvidia", "NVIDIA_DEFAULT_MODEL"), ("cerebras_primary", "CEREBRAS_PRIMARY_MODEL"),
+])
+@pytest.mark.parametrize("model", [
+    "openai/gpt-oss-20b", "openai/gpt-oss-120b",
+    "nvidia/nemotron-3.5-lightning-30b-a3b", "test/alternate-model",
+])
+@pytest.mark.parametrize("pinned", [False, True])
+def test_provider_parameters_require_both_route_and_model(monkeypatch, route, model_field, model, pinned):
+    # Cross-provider identifiers are deliberate configuration fixtures, not a
+    # claim that these providers actually serve every model in the matrix.
+    monkeypatch.setattr(settings, "PROVIDER_ORDER", [route])
+    monkeypatch.setattr(settings, model_field, model)
+    monkeypatch.setattr(settings, "NVIDIA_ENABLED", True)
+    monkeypatch.setattr(settings, "CEREBRAS_ENABLED", True)
+    monkeypatch.setattr(settings, "NVIDIA_ALLOWED_MODELS", [model])
+    monkeypatch.setattr(settings, "NVIDIA_ENABLE_THINKING", True)
+    circuit_breaker._states.clear()
+    client = MultiProviderClient()
+    client.provider_configs[route]["api_key"] = "test"
+
+    def handler(req):
+        payload = json.loads(req.content)
+        expected_keys = {"model", "messages", "temperature", "max_tokens", "stream"}
+        if route in {"groq_fast", "groq_reasoning"} and model in {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}:
+            expected_keys |= {"reasoning_effort", "include_reasoning"}
+            assert payload["reasoning_effort"] == "low"
+            assert payload["include_reasoning"] is False
+        if route == "nvidia" and model == "nvidia/nemotron-3.5-lightning-30b-a3b":
+            expected_keys |= {"chat_template_kwargs", "reasoning_budget"}
+            assert payload["chat_template_kwargs"] == {"enable_thinking": True}
+            assert payload["reasoning_budget"] == 64
+        assert set(payload) == expected_keys
+        assert payload["model"] == model
+        assert payload["max_tokens"] == 128
+        assert payload["stream"] is False
+        return httpx.Response(200, json=completion(model=model))
+
+    try:
+        response = run(client, handler, request(max_tokens=128, **({"model": model} if pinned else {})))
+        assert response.provider_used == route
+        assert not response.fallback_used
+    finally:
+        circuit_breaker._states.clear()
+
+
+@pytest.mark.parametrize("model", ["openai/gpt-oss-20b", "openai/gpt-oss-120b"])
+@pytest.mark.parametrize("failure,category", [
+    ("reasoning_only", "unusable_output"), ("mismatch", "model_mismatch"),
+    ("malformed", "invalid_response"),
+])
+def test_suppressed_groq_reasoning_preserves_validation_and_fallback(client, model, failure, category, monkeypatch, caplog):
+    monkeypatch.setattr(settings, "GROQ_FAST_MODEL", model)
+    client.provider_configs["groq_fast"].update(default_model=model, api_key="test")
+    client.provider_configs = {name: client.provider_configs[name] for name in ("groq_fast", "nvidia")}
+    attempted = []
+
+    def handler(req):
+        payload = json.loads(req.content)
+        attempted.append(payload["model"])
+        if req.url.host == "api.groq.com":
+            assert payload["include_reasoning"] is False
+            assert payload["reasoning_effort"] == "low"
+            assert "reasoning_format" not in payload
+            body = completion(model=model, reasoning="private", reasoning_content="private")
+            if failure == "reasoning_only":
+                body["choices"][0]["message"]["content"] = None
+            elif failure == "mismatch":
+                body["model"] = "unexpected"
+            else:
+                body["choices"][0]["message"]["content"] = {"text": "Hello"}
+            return httpx.Response(200, json=body)
+        assert "include_reasoning" not in payload
+        assert "reasoning_effort" not in payload
+        return httpx.Response(200, json=completion(reasoning_content="private"))
+
+    response = run(client, handler)
+    assert attempted == [model, settings.NVIDIA_DEFAULT_MODEL]
+    assert response.provider_used == "nvidia" and response.fallback_used
+    assert response.routing_diagnostics[0].category == category
+    assert "private" not in response.model_dump_json() + caplog.text

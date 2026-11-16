@@ -71,6 +71,7 @@ class MultiProviderClient:
             and (provider_name != "cerebras_primary" or settings.CEREBRAS_ENABLED)
         }
         for name, config in self.provider_configs.items():
+            config["provider_name"] = name
             config["model_aliases"] = settings.PROVIDER_MODEL_ALIASES.get(name, {})
 
     async def start(self) -> None:
@@ -290,14 +291,17 @@ class MultiProviderClient:
             "stream": False,
         }
         # Apply model-specific controls only to the model whose API supports them.
-        if payload["model"] == "nvidia/nemotron-3.5-lightning-30b-a3b" and "enable_thinking" in config:
+        if config.get("provider_name") == "nvidia" and payload["model"] == "nvidia/nemotron-3.5-lightning-30b-a3b":
             thinking = config["enable_thinking"] and output_tokens > 1
             payload["chat_template_kwargs"] = {"enable_thinking": thinking}
             if thinking:
                 # Reserve at least half the caller's budget for visible output.
                 payload["reasoning_budget"] = min(config["reasoning_budget"], output_tokens // 2)
-        if payload["model"] in {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}:
+        if config.get("provider_name") in {"groq_fast", "groq_reasoning"} and payload["model"] in {
+            "openai/gpt-oss-20b", "openai/gpt-oss-120b",
+        }:
             payload["reasoning_effort"] = "low"
+            payload["include_reasoning"] = False
         attempt_seconds = min(remaining_seconds, config.get("attempt_timeout", remaining_seconds))
         timeout = httpx.Timeout(
             connect=min(settings.REQUEST_CONNECT_TIMEOUT_SECONDS, attempt_seconds),

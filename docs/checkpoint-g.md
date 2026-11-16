@@ -54,9 +54,16 @@ These controls apply only to the named Nemotron model; alternate allowlisted
 models receive no Nemotron-specific parameters. Tiny output budgets can still
 fail and must never be converted into fabricated success.
 
-GPT-OSS requests use documented `reasoning_effort: low`; they do not send
+GPT-OSS requests on Groq Fast/Reasoning routes use documented
+`reasoning_effort: low` and `include_reasoning: false`; they do not send
 `reasoning_format`, which those models do not support according to
 [Groq's reasoning documentation](https://console.groq.com/docs/reasoning).
+These Groq-only options require both the Groq route and an exact GPT-OSS 20B/120B
+identifier. NVIDIA thinking controls similarly require the NVIDIA route and the
+exact Nemotron model. Alternate models/providers receive only common parameters;
+reusing a model identifier on another provider cannot activate these controls.
+Suppressing returned reasoning does not disable reasoning generation or guarantee
+a visible answer within a small output budget. No validation checks are relaxed.
 Public responses retain only assistant role and visible content. Separate
 reasoning fields are discarded. Embedded `<think>` traces are rejected as
 unusable instead of being extracted or exposed. Strict model identity, usage,
@@ -193,6 +200,26 @@ omits the Windows-only colorama hash. No dependency files were changed.
 Local logs/audit JSON remain ignored under `.locks/g-*`. Hosted Linux CI and
 Docker acceptance are separate from these local results. The four LIVE public
 checks exercised the existing deployment, not this branch's code.
+
+## PR review follow-up
+
+The review fix adds explicit Groq reasoning suppression and route/model isolation.
+Local verification: **361 tests passed, 0 failed**, 97% coverage; Ruff, configured
+mypy (3 files), compilation and dependency consistency passed. All tests used
+mock transports; no authenticated provider requests were made. The 38 additional
+cases cover 32 route/model/default-versus-pinned combinations and 6 strict
+validation/fallback cases for both GPT-OSS models. Existing successful Groq tests
+also verify that separate reasoning fields are removed from public responses and
+never logged even if upstream returns them despite `include_reasoning: false`.
+
+Compatibility review found and fixed model-name-only activation of Groq controls
+on other provider routes. Common payload fields, token caps, explicit non-streaming
+behavior, timeouts and circuit semantics remain unchanged. Groq still documents
+`max_tokens` as an accepted deprecated field in its
+[API reference](https://console.groq.com/docs/api-reference); migration to its
+replacement is outside this review fix. Alternate provider/model support and
+account entitlement still require separately approved live acceptance. Hosted CI
+results for the review commit are recorded in PR #3.
 
 ## Rollback
 
