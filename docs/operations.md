@@ -79,13 +79,15 @@ Provider/model eligibility and explicit-model constraints always apply.
 | `unusable_output` (empty/reasoning-only/unsupported non-text result) | No health failure |
 | `model_mismatch` | No health failure; check model/alias configuration |
 | `auth_error` (HTTP 401/403), `provider_configuration_error` | No health failure |
-| `unsupported_model` (HTTP 404), `invalid_request` (other client errors) | No health failure |
+| `unsupported_model` (404 with model_not_found), `upstream_not_found` (other 404), `invalid_request` (other client errors) | No health failure |
 | `missing_credentials`, `model_not_supported`, `fallback_disabled`, `deadline_exceeded` skips | No health failure |
 | `circuit_open` | Skip without attempting HTTP |
 
 HTTP 408 is classified as a timeout. HTTP 404 can also indicate an incorrect
-endpoint; inspect provider configuration when it appears as `unsupported_model`.
-The router does not parse raw error bodies to infer more specific client errors.
+endpoint. Only an explicit model_not_found code is classified as unsupported_model; inspect URL and model permissions for other 404s.
+For 404 only, the router reads at most 8 KiB (also bounded by the configured
+response cap) and checks the structured error code. Raw messages are never
+logged or returned. Model-not-found can also mean the credential lacks access.
 
 Non-health failures preserve existing failure counts. If encountered during a
 half-open recovery probe, they release the probe and retain the prior unhealthy

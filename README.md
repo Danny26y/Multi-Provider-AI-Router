@@ -85,7 +85,14 @@ Set values in the ignored local `.env` or a deployment secret store:
 | `CEREBRAS_ENABLED`, `CEREBRAS_API_KEY` | Optional Cerebras route |
 | `PROVIDER_ORDER` | JSON array of route identifiers |
 | `METRICS_API_KEY` | Separate secret protecting metrics with `X-Metrics-Key` |
-| `TOTAL_REQUEST_TIMEOUT_SECONDS` | Shared routing budget, default 20 seconds |
+| `TOTAL_REQUEST_TIMEOUT_SECONDS` | Shared routing budget, default 60 seconds |
+
+Checkpoint G migrates Groq defaults to `openai/gpt-oss-20b` and
+`openai/gpt-oss-120b`, explicitly disables NVIDIA thinking by default for concise
+answers, and keeps strict validation of visible output. See the
+[recovery evidence and live acceptance procedure](docs/checkpoint-g.md) before
+claiming production recovery. Existing deployment environment overrides must be
+updated explicitly.
 
 Generate random keys in a password manager; do not use example placeholders.
 See [.env.example](.env.example) for phase timeouts, token limits, queue/body limits,
@@ -153,7 +160,7 @@ A fresh checkout can build without local `.locks/` files or a resolver installed
 
 ```powershell
 docker build --pull -t ai-router:local .
-docker run --rm --name ai-router --env-file .env -p 127.0.0.1:8000:8000 --read-only --tmpfs /tmp:rw,noexec,nosuid,size=32m --cap-drop ALL --security-opt no-new-privileges --memory 512m --cpus 1 --stop-timeout 50 ai-router:local
+docker run --rm --name ai-router --env-file .env -p 127.0.0.1:8000:8000 --read-only --tmpfs /tmp:rw,noexec,nosuid,size=32m --cap-drop ALL --security-opt no-new-privileges --memory 512m --cpus 1 --stop-timeout 85 ai-router:local
 ```
 
 Use Linux containers. The image pins its Python base digest, installs the runtime

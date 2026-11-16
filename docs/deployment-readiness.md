@@ -239,7 +239,7 @@ docker run -d --name ai-router --restart unless-stopped \
   --env-file /secure/router.env -p 127.0.0.1:8000:8000 \
   --read-only --tmpfs /tmp:rw,noexec,nosuid,size=32m \
   --cap-drop ALL --security-opt no-new-privileges \
-  --memory 512m --cpus 1 --stop-timeout 50 ai-router:REVIEWED_SHA
+  --memory 512m --cpus 1 --stop-timeout 85 ai-router:REVIEWED_SHA
 ```
 
 The image runs UID/GID 10001, uses exec-form Uvicorn startup, one worker, finite

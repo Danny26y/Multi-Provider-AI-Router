@@ -295,7 +295,7 @@ def test_model_aliases_are_explicit_directional_and_provider_scoped(route, monke
 
 @pytest.mark.parametrize("status,category,health", [
     (400, "invalid_request", False), (401, "auth_error", False), (403, "auth_error", False),
-    (404, "unsupported_model", False), (408, "timeout", True), (422, "invalid_request", False),
+    (404, "upstream_not_found", False), (408, "timeout", True), (422, "invalid_request", False),
     (429, "rate_limited", True), (500, "server_error", True), (502, "server_error", True), (503, "server_error", True),
 ])
 def test_http_classification_and_breaker_thresholds(route, status, category, health):

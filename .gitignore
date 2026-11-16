@@ -3,6 +3,7 @@
 !.env.example
 
 .venv/
+.venv-g/
 venv/
 env/
 ENV/

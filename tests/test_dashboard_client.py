@@ -41,7 +41,7 @@ def test_router_url_payload_headers_and_timeout():
         assert str(req.url) == "https://router.example.test/prefix/v1/chat/completions"
         assert req.headers["X-API-Key"] == KEY
         assert "authorization" not in req.headers
-        assert all(0 < value <= 30 for value in req.extensions["timeout"].values())
+        assert all(0 < value <= 75 for value in req.extensions["timeout"].values())
         assert json.loads(req.content) == {
             "messages": [{"role": "user", "content": "Hello"}], "model": "explicit/model",
             "temperature": 0.2, "max_tokens": 2048, "stream": False,
